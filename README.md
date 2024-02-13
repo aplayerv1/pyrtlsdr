@@ -18,9 +18,13 @@ all data of the usb is in the `http://localhost:8000/api`
 3. Open your web browser and navigate to `http://localhost:8888`.
 arguments for process2.py
     -a or --server-address IP-ADDRESS, default: localhost
+
     -p or --server-port  PORTNUMBER, default: 8888
+
     -o or --lnb-offset if you have a LNB plugged in default: 9750e6 which is in hz
+
     -f or --frequency, default:100e6 `example for 1.2 GHZ = 1200.00e6`
+    
     -g or --gain, default auto
 
 

@@ -27,20 +27,20 @@ all data of the usb is in the `http://localhost:8000/api`
 4. To process data from a binary file captured from rtl_sdr run `python3 process.py` don't forget that arguments are required.
 
 the raw file name must be NAME_YYYYMMDD_HHMMMM.bin
-
-arguments for process.py
-    -i or --input, `example python3 process.py -i pathoffile`
-    -o or --output, `example python3 process.py -i pathoffolder -o ./` for local directory
-    -s or --sampling_rate, default: 2.4e6 `which is 2.4mhz`
-    -c or --center_frequency, default: 1420.30e6 `which is 1.4203 ghz`
-
-`example python3 process.py -i file.bin -o ./ -f 1420.30e6 -s 2.4e6`
-
-output of files are:
-    1. heatmap
-    2. frequency spectrum
-    3. signal strength
-    4. preprocessed heatmap
+                
+                arguments for process.py
+                    -i or --input, `example python3 process.py -i pathoffile`
+                    -o or --output, `example python3 process.py -i pathoffolder -o ./` for local directory
+                    -s or --sampling_rate, default: 2.4e6 `which is 2.4mhz`
+                    -c or --center_frequency, default: 1420.30e6 `which is 1.4203 ghz`
+                
+                `example python3 process.py -i file.bin -o ./ -f 1420.30e6 -s 2.4e6`
+                
+                output of files are:
+                    1. heatmap
+                    2. frequency spectrum
+                    3. signal strength
+                    4. preprocessed heatmap
 
 
 ## Contributing

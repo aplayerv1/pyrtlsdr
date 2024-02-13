@@ -41,7 +41,8 @@ the raw file name must be NAME_YYYYMMDD_HHMMMM.bin
                     2. frequency spectrum
                     3. signal strength
                     4. preprocessed heatmap
-
+## server of rtlsdr demo 
+https://dos.mvia.ca
 
 ## Contributing
 

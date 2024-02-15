@@ -22,6 +22,11 @@ def extract_date_from_filename(filename):
     else:
         return None, None
     
+def apply_digital_gain(signal_data, gain_factor):
+    # Apply digital gain to the signal data
+    # Adjust the signal data based on the gain factor
+    return signal_data * gain_factor
+
 def plot_wavelet_features(features, output_dir, date, time):
     # Example: Plot wavelet features as a bar chart
     num_features = len(features)
@@ -210,6 +215,17 @@ def preprocess_data(data):
     normalized_data = (data - np.mean(data)) / np.std(data)
     return normalized_data
 
+def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):
+    nyquist = sampling_frequency / 2
+    lnb_normalized_frequency = lnb_offset_frequency / nyquist
+    if lnb_normalized_frequency >= 1:
+        lnb_normalized_frequency = 0.99
+    elif lnb_normalized_frequency <= 0:
+        lnb_normalized_frequency = 0.01
+    b, a = signal.butter(5, lnb_normalized_frequency, btype='high')
+    filtered_data = signal.filtfilt(b, a, signal_data)
+    return filtered_data
+
 def main(args):
     # Extract date from the input filename
     filename = os.path.basename(args.input)
@@ -224,18 +240,19 @@ def main(args):
             print("Binary data shape:", binary_data.shape)
         # Create the output directory if it does not exist
         os.makedirs(args.output, exist_ok=True)
-
+        binary_data_with_gain = apply_digital_gain(binary_data, args.gain_factor)
+        binary_data_no_lnb = remove_lnb_offset(binary_data_with_gain, args.sampling_rate, args.lnb_offset)
         # Generate heatmap
-        generate_heatmap(binary_data, args.output, date, time)
-        preprocessed_data = preprocess_data(binary_data)
+        generate_heatmap(binary_data_no_lnb, args.output, date, time)
+        preprocessed_data = preprocess_data(binary_data_no_lnb)
         generate_preprocessed_heatmap(preprocessed_data, args.output, date, time)
         # Analyze signal strength
-        analyze_signal_strength(binary_data, args.output, date, time)
+        analyze_signal_strength(binary_data_no_lnb, args.output, date, time)
 
         # Generate frequency spectrum
-        generate_frequency_spectrum(binary_data, args.output, date, time, args.sampling_rate)
+        generate_frequency_spectrum(binary_data_no_lnb, args.output, date, time, args.sampling_rate)
         # Extract wavelet features with bandpass filtering
-        wavelet_features = extract_wavelet_features_with_bandpass(binary_data, args.sampling_rate, args.center_frequency)
+        wavelet_features = extract_wavelet_features_with_bandpass(binary_data_no_lnb, args.sampling_rate, args.center_frequency)
 
         #Generate wavelet
         plot_wavelet_features(wavelet_features, args.output,date,time)
@@ -253,6 +270,8 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', type=str, default='output', help='Output directory for PNG files (default: output)')
     parser.add_argument('-s', '--sampling_rate', type=float, default=2.4e6, help='Sampling rate in Hz (default: 2.4e6)')
     parser.add_argument('-c', '--center_frequency', type=float, default=1420.40e6, help='Center frequency in Hz (default: 1420.30e6)')
+    parser.add_argument('-l', '--lnb-offset', type=float, default=9750e6, help='LNB offset frequency in Hz')
+    parser.add_argument('-g', '--gain-factor', type=float, default=1.0, help='Digital gain factor')
     args = parser.parse_args()
 
     main(args)

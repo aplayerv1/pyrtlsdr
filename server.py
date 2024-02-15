@@ -29,14 +29,17 @@ def main(args):
 
             # Configure RTL-SDR
             sdr.sample_rate = sample_rate
-            sdr.center_freq = center_frequency
-            sdr.gain = gain  # Set gain directly
+            sdr.center_freq = center_frequency - lnb_frequency  # Adjust the center frequency with LNB offset
+            sdr.gain = gain
+
 
             # Stream data to the client
             while True:
                 samples = sdr.read_samples(1024)
+                print(samples)
                 try:
                     client_socket.sendall(samples)
+                    print("Stream data:", samples)  # Print stream data
                 except BrokenPipeError:
                     print("Client disconnected.")
                     break

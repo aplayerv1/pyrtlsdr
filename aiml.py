@@ -7,10 +7,19 @@ from scipy import signal
 import socket
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
+import os
 
 signal_strength_threshold = 6
 NUM_SYNTHETIC_SAMPLES = 1024
 NUM_EVENTS = 1024
+log_file = 'aiml.output.log'
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler = RotatingFileHandler(log_file, maxBytes=1*1024*1024, backupCount=2)
+file_handler.setFormatter(log_formatter)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(log_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -98,7 +107,6 @@ def main(args):
     logging.info(f"Received sampling frequency: {args.sampling_frequency}")
     logging.info(f"Received cutoff frequency: {args.cutoff_frequency}")
     logging.info(f"Received notch bandwidth: {args.notch_bandwidth}")
-
     try:
         model = joblib.load('signal_detection_model.pkl')
         logging.info("Model loaded successfully")
@@ -118,6 +126,18 @@ def main(args):
         client_socket.sendall(tuning_parameters.encode())
 
         while True:
+            os.system('sleep 1')
+            try:
+               model = joblib.load('signal_detection_model.pkl')
+               logging.info("Model loaded successfully")
+            except FileNotFoundError:
+                 logging.warning("Model file not found. Creating a new model.")
+                 model = train_model()  # Train a new model or initialize it as per your requirements
+                 save_model(model, 'signal_detection_model.pkl')
+            except Exception as e:
+                 logging.error(f"Error loading the model: {e}")
+
+
             samples = receive_samples_from_server(client_socket)
             samples_array = np.frombuffer(samples, dtype=np.uint8)
             lnb_removed_data = remove_lnb_offset(samples_array, args.sampling_frequency, args.lnb_offset)
@@ -126,7 +146,7 @@ def main(args):
             noise_removed_data = remove_noise(lnb_removed_data, args.sampling_frequency, args.cutoff_frequency)
             logging.info("Noise removed from the signal")
 
-            signal_threshold = 0.01
+            signal_threshold = 0.5
             real_data = noise_removed_data
             synthetic_wow_data = generate_synthetic_wow_signal(len(noise_removed_data), NUM_EVENTS)
             synthetic_wow_data = np.array(synthetic_wow_data)  # Convert to NumPy array
@@ -143,18 +163,12 @@ def main(args):
             num_samples = min(len(noise_removed_data), len(synthetic_wow_data))
             
             noise_removed_data_reshaped = noise_removed_data.reshape(-1, 1)
-            print("Updated shape of noise_removed_data_reshaped:", noise_removed_data_reshaped.shape)   
 
             # Ensure that synthetic_wow_data is resized to match the length of noise_removed_data
             synthetic_wow_data_resized = synthetic_wow_data[:len(noise_removed_data_reshaped)]
             # Take only the first 1024 rows of synthetic_wow_data_resized
             synthetic_wow_data_resized = synthetic_wow_data_resized[:, :1]
 
-            print("Length of noise_removed_data:", len(noise_removed_data_reshaped))
-            print("Length of synthetic_wow_data_resized:", len(synthetic_wow_data_resized))
-
-            print("Shape of noise_removed_data:", noise_removed_data.shape)
-            print("Shape of synthetic_wow_data_resized:", synthetic_wow_data_resized.shape)
 
             # Concatenate noise_removed_data_reshaped and synthetic_wow_data_resized
             combined_data = np.concatenate((noise_removed_data_reshaped, synthetic_wow_data_resized), axis=1)

@@ -8,11 +8,18 @@ from tqdm import tqdm
 import pywt
 import time as tm
 from scipy.signal import butter, sosfiltfilt
+from astropy.io import fits
+import cv2
+from scipy.ndimage import gaussian_filter
+from datetime import datetime, timedelta
+from scipy import ndimage
+from skimage import exposure
 
 # Define the speed of light in meters per second
 speed_of_light = 299792458  # meters per second
-delta_lambda = 500e-9  # Change in wavelength in meters (500 nanometers)
-lambda_0 = 500e-9      # Rest wavelength in meters (500 nanometers)
+delta_lambda = 1e-2  # Change in wavelength in 
+lambda_0 = 0.211      # Rest wavelength in meters (500 nanometers)
+EARTH_ROTATION_RATE = 15  # degrees per hour
 
 def extract_date_from_filename(filename):
     # Extract date and time from filename using regular expression
@@ -24,7 +31,38 @@ def extract_date_from_filename(filename):
         return date, time
     else:
         return None, None
+
+def extract_observation_start_time(fits_filename):
+    with fits.open(fits_filename) as hdul:
+        header = hdul[0].header
+        # Extract observation start time from the header (adjust the keyword as per your FITS file)
+        start_time_str = header['DATE']
+        # Convert the string to a datetime object
+        start_time = datetime.strptime(start_time_str, '%Y-%m-%d')
+    return start_time
+
+# Function to calculate Earth's rotation angle
+def calculate_rotation_angle(start_time):
+    # Determine elapsed time since the observation start time
+    elapsed_time = datetime.now() - start_time
+    # Calculate rotation angle (assume 15 degrees per hour)
+    rotation_angle = int((elapsed_time.total_seconds() / 3600) * EARTH_ROTATION_RATE) % 4
+    return rotation_angle
+
+
+def apply_rotation(data, rotation_angle):
+    # Reshape the 1D data array to 2D (a column vector)
+    data_2d = data[:, np.newaxis]
+    # Rotate the data array by the specified angle
+    rotated_data_2d = ndimage.rotate(data_2d, rotation_angle, reshape=False, mode='nearest')   
+    # Reshape the rotated 2D array back to 1D
+    rotated_data = rotated_data_2d.flatten()
     
+    return rotated_data
+
+
+
+
 def calculate_velocity(delta_lambda, lambda_0, is_redshift=True):
     # Determine the sign based on redshift or blueshift
     sign = 1 if is_redshift else -1
@@ -51,28 +89,20 @@ def apply_redshift(data, delta_lambda, lambda_0):
 
 
 # Function to apply blueshift
-def apply_blueshift(data, delta_lambda, lambda_0):
-    # Constants
-    speed_of_light = 299792458  # Speed of light in meters per second
-
-    # Calculate velocity using delta_lambda and lambda_0
-    velocity = (delta_lambda / lambda_0) * speed_of_light
-
-    # Apply blueshift formula
-    shifted_data = data * np.sqrt((1 - velocity / speed_of_light) / (1 + velocity / speed_of_light))
-
+def apply_blueshift(data):
+    # No Doppler shift for radio signals, so return the original data
+    shifted_data = data
     return shifted_data
-
 
 def image_reconstruction(signal_data, shift_type='none', delta_lambda=None, lambda_0=None):
     # Apply shift based on the shift_type
     if shift_type == 'redshift':
         shifted_signal = apply_redshift(signal_data, delta_lambda, lambda_0)
     elif shift_type == 'blueshift':
-        shifted_signal = apply_blueshift(signal_data, delta_lambda, lambda_0)
+        shifted_signal = apply_blueshift(signal_data)
     elif shift_type == 'both':
         redshifted_signal = apply_redshift(signal_data, delta_lambda, lambda_0)
-        shifted_signal = apply_blueshift(redshifted_signal, delta_lambda, lambda_0)
+        shifted_signal = apply_blueshift(redshifted_signal)
     else:
         shifted_signal = signal_data  # no shift
 
@@ -94,58 +124,35 @@ def image_reconstruction(signal_data, shift_type='none', delta_lambda=None, lamb
 
     return reconstructed_image
 
+def compute_spectrogram(samples):
+    spectrogram, frequencies, times, _ = plt.specgram(samples, Fs=2.4e6)
+    return spectrogram
 
-
-
-def plot_wavelet_features(features, output_dir, date, time, shift_type, delta_lambda, lambda_0):
-    # Example: Plot wavelet features as a bar chart
-    num_features = len(features)
-    feature_labels = [f'Feature {i+1}' for i in range(num_features)]
-
-    # Apply redshift or blueshift if specified
-    if shift_type == 'redshift':
-        shifted_data = apply_redshift(features, delta_lambda, lambda_0)
-    elif shift_type == 'blueshift':
-        shifted_data = apply_blueshift(features, delta_lambda, lambda_0)
-    else:
-        shifted_data = features  # No shift applied
-
-    if shifted_data is not None:
-        plt.figure(figsize=(36, 24))
-        plt.bar(feature_labels, shifted_data)
-        plt.xlabel('Feature')
-        plt.ylabel('Value')
-        plt.title(f'Wavelet Features ({shift_type.capitalize()} Shift)')
-        plt.grid(True)
-
-        # Save the plot
-        wavelet_plot_filename = os.path.join(output_dir, f'wavelet_features_{date}_{time}_{shift_type}.png')
-        plt.savefig(wavelet_plot_filename, bbox_inches='tight')
+def save_plots_to_png(spectrogram, signal_strength, png_location, date, time):
+    try:
+        # Plot and save spectrogram
+        plt.figure()
+        plt.imshow(spectrogram.T, aspect='auto', cmap='viridis', origin='lower')
+        plt.title('Spectrogram')
+        plt.colorbar()
+        plt.savefig(f'{png_location}/spectrogram_{date}_{time}.png')
         plt.close()
-    else:
-        print(f"Error: Shifted data is None for {shift_type} shift")
+                # Plot and save signal strength
+        plt.figure()
+        plt.plot(signal_strength)
+        plt.title('Signal Strength')
+        plt.xlabel('Sample Index')
+        plt.ylabel('Amplitude')
+        plt.savefig(f'{png_location}/signal_strength_{date}_{time}.png')
+        plt.close()
 
-def extract_wavelet_features_with_bandpass(signal_data, sampling_rate, center_frequency):
-    # Apply bandpass filter to the signal data
-    filtered_signal = bandpass_filter(signal_data, sampling_rate, center_frequency)
+    except Exception as e:
+        print(f"Error occurred while saving plots: {e}")
 
-    # Decompose the filtered signal using wavelet transform
-    coeffs = pywt.wavedec(filtered_signal, 'db1', level=5)  # Adjust wavelet and decomposition level as needed
-
-    # Extract features from the wavelet coefficients
-    features = []
-    for coeff in coeffs:
-        features.append(np.mean(coeff))
-        features.append(np.std(coeff))
-        features.append(np.max(coeff))
-        features.append(np.min(coeff))
-
-    return features
-
-def preprocess_data(signal_data):
-    # Normalize the signal data to have zero mean and unit variance
-    normalized_data = (signal_data - np.mean(signal_data)) / np.std(signal_data)
-    return normalized_data
+def preprocess_data(data):
+    # Replace negative values with zeros
+    data[data < 0] = 0
+    return data
 
 def bandpass_filter(signal_data, sampling_rate, center_frequency, bandwidth=100e6, filter_order=5):
     preprocessed_signal = preprocess_data(signal_data)
@@ -165,24 +172,41 @@ def bandpass_filter(signal_data, sampling_rate, center_frequency, bandwidth=100e
     signal_data_filtered = sosfiltfilt(sos, preprocessed_signal)
     return signal_data_filtered
 
+def apply_filter_and_enhancement(data):
+    # Apply Gaussian smoothing to reduce noise
+    smoothed_data = gaussian_filter(data, sigma=1)
+
+    # Apply contrast stretching for enhancement
+    p_low, p_high = np.percentile(smoothed_data, (5, 95))  # Adjust percentiles as needed
+    stretched_data = exposure.rescale_intensity(smoothed_data, in_range=(p_low, p_high))
+
+    return stretched_data
+
+
+
 def generate_heatmap(data, output_dir, date, time, shift_type=None):
-    with tqdm(total=1, desc='Generating Heatmap') as pbar:
+    with tqdm(total=1, desc='Generating Heatmap with Filtering and Enhancement') as pbar:
         # Apply redshift or blueshift if specified
         if shift_type == 'redshift':
             redshifted_data = apply_redshift(data, delta_lambda, lambda_0)
             data = redshifted_data
         elif shift_type == 'blueshift':
-            blueshifted_data = apply_blueshift(data, delta_lambda, lambda_0)
+            blueshifted_data = apply_blueshift(data)
             data = blueshifted_data
         elif shift_type == 'both':
             redshifted_data = apply_redshift(data, delta_lambda, lambda_0)
-            blueshifted_data = apply_blueshift(redshifted_data, delta_lambda, lambda_0)
+            blueshifted_data = apply_blueshift(redshifted_data)
             data = blueshifted_data
         elif shift_type == 'none':
-            data = data
+            pass  # No shift applied
 
+        pepro = preprocess_data(data)
+                # Normalize the data using logarithmic scaling
+        normalized_data = np.log1p(pepro)
+        # Apply filtering and enhancement
+        filtered_data = apply_filter_and_enhancement(normalized_data)
         # Determine the heatmap dimensions based on the size of the data
-        num_samples = len(data)
+        num_samples = len(normalized_data)
         num_columns = int(np.sqrt(num_samples))  # Adjust to sqrt for more square-like heatmap
         num_rows = int(np.ceil(num_samples / num_columns))  # Adjust to ceil for any remaining rows
 
@@ -190,16 +214,16 @@ def generate_heatmap(data, output_dir, date, time, shift_type=None):
         heatmap_size = num_rows * num_columns
 
         # Pad the data with zeros if necessary to ensure the reshaping works
-        padded_data = np.pad(data, (0, heatmap_size - num_samples), mode='constant')
+        padded_data = np.pad(filtered_data, (0, heatmap_size - num_samples), mode='constant')
 
         # Reshape the padded data into a 2D array for the heatmap
         heatmap_data = padded_data.reshape((num_rows, -1))
 
         # Create and save the heatmap image
-        plt.figure(figsize=(102, 57))
-        plt.imshow(heatmap_data, cmap='viridis', aspect='auto')
-        plt.colorbar(label='Intensity')
-        plt.title(f'Heatmap of RTL-SDR Data ({shift_type.capitalize()} Shift)')
+        plt.figure(figsize=(12, 8))
+        plt.imshow(heatmap_data, cmap='coolwarm', aspect='auto', interpolation='nearest')
+        plt.colorbar(label='Intensity (log scale)')
+        plt.title(f'Heatmap of RTL-SDR Data with Filtering and Enhancement ({shift_type.capitalize()} Shift)')
         plt.xlabel('X-axis')
         plt.ylabel('Y-axis')
 
@@ -210,16 +234,17 @@ def generate_heatmap(data, output_dir, date, time, shift_type=None):
 
         pbar.update(1)  # Update progress bar
 
+
 def generate_frequency_spectrum(data, output_dir, date, time, sampling_rate, shift_type='none', delta_lambda=None, lambda_0=None):
     with tqdm(total=1, desc='Generating Frequency Spectrum') as pbar:
         # Apply shift based on the shift_type
         if shift_type == 'redshift':
             shifted_data = apply_redshift(data, delta_lambda, lambda_0)
         elif shift_type == 'blueshift':
-            shifted_data = apply_blueshift(data, delta_lambda, lambda_0)
+            shifted_data = apply_blueshift(data)
         elif shift_type == 'both':
             redshifted_data = apply_redshift(data, delta_lambda, lambda_0)
-            shifted_data = apply_blueshift(redshifted_data, delta_lambda, lambda_0)
+            shifted_data = apply_blueshift(redshifted_data)
         else:
             shifted_data = data  # no shift
 
@@ -250,10 +275,10 @@ def analyze_signal_strength(data, output_dir, date, time, shift_type='none'):
         if shift_type == 'redshift':
             shifted_data = apply_redshift(data, delta_lambda, lambda_0)
         elif shift_type == 'blueshift':
-            shifted_data = apply_blueshift(data, delta_lambda, lambda_0)
+            shifted_data = apply_blueshift(data)
         elif shift_type == 'both':
             redshifted_data = apply_redshift(data, delta_lambda, lambda_0)
-            shifted_data = apply_blueshift(redshifted_data, delta_lambda, lambda_0)
+            shifted_data = apply_blueshift(redshifted_data)
         else:
             shifted_data = data  # no shift
 
@@ -279,13 +304,13 @@ def analyze_signal_strength(data, output_dir, date, time, shift_type='none'):
         plt.savefig(histogram_filename, bbox_inches='tight')
         plt.close()
 
-        # Save the statistical analysis results
-        analysis_results = f"Mean Signal Strength: {mean_strength:.2f}\n"
-        analysis_results += f"Standard Deviation of Signal Strength: {std_dev_strength:.2f}\n"
-        analysis_results_filename = os.path.join(output_dir, f'signal_strength_analysis_{date}_{time}_{shift_type}.txt')
-        with open(analysis_results_filename, 'w') as f:
-            f.write("Signal Strength Analysis Results:\n")
-            f.write(analysis_results)
+        # # Save the statistical analysis results
+        # analysis_results = f"Mean Signal Strength: {mean_strength:.2f}\n"
+        # analysis_results += f"Standard Deviation of Signal Strength: {std_dev_strength:.2f}\n"
+        # analysis_results_filename = os.path.join(output_dir, f'signal_strength_analysis_{date}_{time}_{shift_type}.txt')
+        # with open(analysis_results_filename, 'w') as f:
+        #     f.write("Signal Strength Analysis Results:\n")
+        #     f.write(analysis_results)
 
         pbar.update(1)  # Update progress bar
 
@@ -296,10 +321,10 @@ def generate_preprocessed_heatmap(preprocessed_data, output_dir, date, time, shi
         if shift_type == 'redshift':
             shifted_data = apply_redshift(preprocessed_data, delta_lambda, lambda_0)
         elif shift_type == 'blueshift':
-            shifted_data = apply_blueshift(preprocessed_data, delta_lambda, lambda_0)
+            shifted_data = apply_blueshift(preprocessed_data)
         elif shift_type == 'both':
             redshifted_data = apply_redshift(preprocessed_data, delta_lambda, lambda_0)
-            shifted_data = apply_blueshift(redshifted_data, delta_lambda, lambda_0)
+            shifted_data = apply_blueshift(redshifted_data)
         else:
             shifted_data = preprocessed_data  # no shift
 
@@ -333,6 +358,18 @@ def generate_preprocessed_heatmap(preprocessed_data, output_dir, date, time, shi
         pbar.update(1)  # Update progress bar
 
 
+# def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):
+#     nyquist = sampling_frequency / 2
+#     lnb_normalized_frequency = lnb_offset_frequency / nyquist
+#     if lnb_normalized_frequency >= 1:
+#         lnb_normalized_frequency = 0.99
+#     elif lnb_normalized_frequency <= 0:
+#         lnb_normalized_frequency = 0.01
+#     b, a = signal.butter(5, lnb_normalized_frequency, btype='high')
+#     filtered_data = signal.filtfilt(b, a, signal_data)
+#     return filtered_data
+
+
 def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):
     nyquist = sampling_frequency / 2
     lnb_normalized_frequency = lnb_offset_frequency / nyquist
@@ -343,6 +380,7 @@ def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):
     b, a = signal.butter(5, lnb_normalized_frequency, btype='high')
     filtered_data = signal.filtfilt(b, a, signal_data)
     return filtered_data
+
 
 def save_visualized_image(reconstructed_image, output_dir, date, time, shift_type='none'):
     # Create the output directory if it does not exist
@@ -369,20 +407,26 @@ def main(args):
     # Extract date from the input filename
     filename = os.path.basename(args.input)
     date, time = extract_date_from_filename(filename)
-    start_time = tm.time()
+    start_time_begin = tm.time()
+    spectrogram_data, signal_strength_data = [],[]
+    # Extract observation start time from FITS header
+    start_time = extract_observation_start_time(args.input)
+    # Calculate Earth's rotation angle
+    rotation_angle = calculate_rotation_angle(start_time)
 
     if date:
-        # Read the RTL-SDR binary file
-        with open(args.input, 'rb') as f:
-            # Read the binary data and store it in a numpy array
-            binary_data = np.fromfile(f, dtype=np.uint8)
-            print("Binary data shape:", binary_data.shape)
+        # Read the data from the FITS file
+        hdul = fits.open(args.input, ignore_missing_simple=True)
+        data = hdul[0].data
+        hdul.close()
+        rotated_data = apply_rotation(data, rotation_angle)
         # Create the output directory if it does not exist
         os.makedirs(args.output, exist_ok=True)
-        binary_data_no_lnb = remove_lnb_offset(binary_data, args.sampling_rate, args.lnb_offset)
-
-        # Generate heatmap
-       # generate_heatmap(binary_data_no_lnb, args.output, date, time)
+        
+        # Preprocess the data
+        binary_data_no_lnb = remove_lnb_offset(rotated_data,args.sampling_rate,args.lnb_offset)
+       
+       # Generate heatmap
         generate_heatmap(binary_data_no_lnb, args.output, date, time, shift_type='redshift')
         generate_heatmap(binary_data_no_lnb, args.output, date, time, shift_type='blueshift')
         generate_heatmap(binary_data_no_lnb, args.output, date, time, shift_type='both')
@@ -406,17 +450,7 @@ def main(args):
         generate_frequency_spectrum(binary_data_no_lnb, args.output, date, time, args.sampling_rate, shift_type='blueshift', delta_lambda=delta_lambda, lambda_0=lambda_0)
         generate_frequency_spectrum(binary_data_no_lnb, args.output, date, time, args.sampling_rate, shift_type='both', delta_lambda=delta_lambda, lambda_0=lambda_0)
         generate_frequency_spectrum(binary_data_no_lnb, args.output, date, time, args.sampling_rate, shift_type='none', delta_lambda=delta_lambda, lambda_0=lambda_0)
-       
-       
-       
-        # # Extract wavelet features with bandpass filtering
-        # wavelet_features = extract_wavelet_features_with_bandpass(binary_data_no_lnb, args.sampling_rate, args.center_frequency)
 
-        # # Generate wavelet
-        # plot_wavelet_features(wavelet_features, args.output, date, time, shift_type='redshift', delta_lambda=delta_lambda, lambda_0=lambda_0)
-        # plot_wavelet_features(wavelet_features, args.output, date, time, shift_type='blueshift', delta_lambda=delta_lambda, lambda_0=lambda_0)
-        # plot_wavelet_features(wavelet_features, args.output, date, time, shift_type='both', delta_lambda=delta_lambda, lambda_0=lambda_0)
-        # plot_wavelet_features(wavelet_features, args.output, date, time, shift_type='none', delta_lambda=delta_lambda, lambda_0=lambda_0)
 
         reconstructed_image = image_reconstruction(preprocessed_data, shift_type='redshift', delta_lambda=delta_lambda, lambda_0=lambda_0)
         save_visualized_image(reconstructed_image, args.output, date, time, shift_type='redshift')
@@ -428,8 +462,24 @@ def main(args):
         save_visualized_image(reconstructed_image, args.output, date, time, shift_type='none')
 
 
+        apfe = apply_filter_and_enhancement(data)
+
+        spectrogram = compute_spectrogram(apfe)
+        signal_strength = np.abs(spectrogram)
+
+        spectrogram_data.append(spectrogram)
+        signal_strength_data.append(signal_strength)
+
+        spectrogram_data = np.array(spectrogram_data)
+        signal_strength_data = np.array(signal_strength_data)
+
+
+
+        save_plots_to_png(spectrogram_data[-1], signal_strength_data[-1],args.output, date, time)
+        
+
         end_time = tm.time()
-        total_time = (end_time - start_time)/60
+        total_time = (end_time - start_time_begin)/60
         print(f"Total time taken: {total_time} minutes")
     else:
         print("Unable to extract date from the filename.")

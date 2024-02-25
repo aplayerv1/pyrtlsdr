@@ -1,7 +1,0 @@
-numpy==1.21.2
-matplotlib==3.4.3
-tqdm==4.62.3
-scipy
-#rtlsdr
-#json
-pywavelets

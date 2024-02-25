@@ -55,6 +55,7 @@ def remove_noise(signal_data, sampling_frequency, cutoff_frequency):
     cutoff = cutoff_frequency / nyquist
     b, a = signal.butter(5, cutoff, btype='low')
     filtered_data = signal.filtfilt(b, a, signal_data)
+    print(filtered_data)
     return filtered_data
 
 def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):

@@ -1,3 +1,0 @@
-Signal Strength Analysis Results:
-Mean Signal Strength: 0.00
-Standard Deviation of Signal Strength: 0.00

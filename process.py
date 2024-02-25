@@ -14,7 +14,9 @@ from scipy.ndimage import gaussian_filter
 from datetime import datetime, timedelta
 from scipy import ndimage
 from skimage import exposure
+import gc
 
+gc.enable()
 # Define the speed of light in meters per second
 speed_of_light = 299792458  # meters per second
 delta_lambda = 1e-2  # Change in wavelength in 
@@ -25,15 +27,20 @@ def extract_date_from_filename(filename):
     # Extract date and time from filename using regular expression
     pattern = r'(\d{8})_(\d{6})'  # Assuming the format is YYYYMMDD_HHMMSS
     match = re.search(pattern, filename)
+    header = fits.Header()
     if match:
         date = match.group(1)
         time = match.group(2)
+        with fits.open(filename, ignore_missing_simple=True) as hdul:
+            header['DATE'] = date
+            hdu = fits.PrimaryHDU(header=header)
+            hdul.append(hdu)
         return date, time
     else:
         return None, None
 
 def extract_observation_start_time(fits_filename):
-    with fits.open(fits_filename) as hdul:
+    with fits.open(fits_filename, ignore_missing_simple=True) as hdul:
         header = hdul[0].header
         # Extract observation start time from the header (adjust the keyword as per your FITS file)
         start_time_str = header['DATE']
@@ -94,7 +101,7 @@ def apply_blueshift(data):
     shifted_data = data
     return shifted_data
 
-def image_reconstruction(signal_data, shift_type='none', delta_lambda=None, lambda_0=None):
+def image_reconstruction(signal_data, shift_type='none', delta_lambda=None, lambda_0=None, apply_fft=False, inverse=False):
     # Apply shift based on the shift_type
     if shift_type == 'redshift':
         shifted_signal = apply_redshift(signal_data, delta_lambda, lambda_0)
@@ -106,21 +113,36 @@ def image_reconstruction(signal_data, shift_type='none', delta_lambda=None, lamb
     else:
         shifted_signal = signal_data  # no shift
 
-    # Calculate the total number of elements in the signal data
-    total_elements = len(shifted_signal)
+    # Reshape the signal data to a 2D array (1D data treated as single row)
 
-    # Find the nearest square root of the total elements
-    sqrt_elements = int(np.sqrt(total_elements))
+    # Apply FFT if specified
+    if apply_fft:
+        shifted_signal_2d = np.reshape(shifted_signal, (1, len(shifted_signal)))
 
-    # Find the closest divisor to the square root
-    for i in range(sqrt_elements, 0, -1):
-        if total_elements % i == 0:
-            width = i
-            height = total_elements // i
-            break
+        # Compute the FFT of the signal data
+        fft_result = np.fft.fft2(shifted_signal_2d)
 
-    # Reshape the signal data to the determined dimensions
-    reconstructed_image = shifted_signal.reshape((height, width))
+        # Compute the magnitude spectrum (absolute values) of the FFT result
+        magnitude_spectrum = np.abs(fft_result)
+
+        # Compute the phase spectrum of the FFT result
+        phase_spectrum = np.angle(fft_result)
+
+        # Reconstruct the image from the magnitude and phase spectra
+        reconstructed_image = np.fft.ifft2(magnitude_spectrum * np.exp(1j * phase_spectrum)).real
+
+        # Apply inverse FFT if specified
+        if inverse:
+            # Compute the inverse FFT to reconstruct the original signal
+            reconstructed_signal_2d = np.fft.ifft2(fft_result).real
+
+            # Flatten the 2D reconstructed signal into a 1D array
+            reconstructed_signal = np.ravel(reconstructed_signal_2d)
+
+            return reconstructed_signal
+    else:
+        shifted_signal_2d = np.reshape(shifted_signal, (1, len(shifted_signal)))
+        reconstructed_image = shifted_signal_2d
 
     return reconstructed_image
 
@@ -420,13 +442,14 @@ def main(args):
         data = hdul[0].data
         hdul.close()
         rotated_data = apply_rotation(data, rotation_angle)
+        
         # Create the output directory if it does not exist
         os.makedirs(args.output, exist_ok=True)
         
         # Preprocess the data
         binary_data_no_lnb = remove_lnb_offset(rotated_data,args.sampling_rate,args.lnb_offset)
        
-       # Generate heatmap
+        #Generate heatmap
         generate_heatmap(binary_data_no_lnb, args.output, date, time, shift_type='redshift')
         generate_heatmap(binary_data_no_lnb, args.output, date, time, shift_type='blueshift')
         generate_heatmap(binary_data_no_lnb, args.output, date, time, shift_type='both')
@@ -460,6 +483,11 @@ def main(args):
         save_visualized_image(reconstructed_image, args.output, date, time, shift_type='both')
         reconstructed_image = image_reconstruction(preprocessed_data, shift_type='none', delta_lambda=delta_lambda, lambda_0=lambda_0)
         save_visualized_image(reconstructed_image, args.output, date, time, shift_type='none')
+        reconstructed_image = image_reconstruction(preprocessed_data, shift_type='redshift', delta_lambda=delta_lambda, lambda_0=lambda_0, apply_fft=True, inverse=False)
+        save_visualized_image(reconstructed_image, args.output, date, time, shift_type='FFT')
+        reconstructed_image = image_reconstruction(preprocessed_data, shift_type='redshift', delta_lambda=delta_lambda, lambda_0=lambda_0, apply_fft=False, inverse=True)
+        save_visualized_image(reconstructed_image, args.output, date, time, shift_type='I')
+
 
 
         apfe = apply_filter_and_enhancement(data)
@@ -481,6 +509,7 @@ def main(args):
         end_time = tm.time()
         total_time = (end_time - start_time_begin)/60
         print(f"Total time taken: {total_time} minutes")
+        
     else:
         print("Unable to extract date from the filename.")
     
@@ -496,3 +525,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(args)
+    
+gc.collect()

@@ -6,8 +6,8 @@ do
     # Commands or scripts to execute indefinitely
     # For example, you can print a message
     echo "This loop will continue indefinitely"
-    python3 range.py 10.10.1.144 8886 --start-freq $val3 --single-freq  --duration 900
-    python3 range.py 10.10.1.144 8886 --start-freq $val --end-freq $val2 --duration 900
+    python3 range.py IP 8886 --start-freq $val3 --single-freq  --duration 900
+    python3 range.py IP 8886 --start-freq $val --end-freq $val2 --duration 900
 
 for file in *.fits; do
     echo $file

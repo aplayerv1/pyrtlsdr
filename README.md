@@ -84,8 +84,8 @@ python process.py the raw file name must be NAME_YYYYMMDD_HHMMMM.bin
 
 
                     
-## The server with the conjunction of process2.py
-Is running at https://dos.mvia.ca the api is at https://dos.mvia.ca/api
+## The server with the conjunction of process output
+https://mvia.ca
 
 ## Contributing
 

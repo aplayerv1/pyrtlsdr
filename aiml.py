@@ -9,6 +9,10 @@ import argparse
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import matplotlib.pyplot as plt
+import json
+import matplotlib
+matplotlib.use('TkAgg')  # Choose an appropriate backend
 
 signal_strength_threshold = 6
 NUM_SYNTHETIC_SAMPLES = 1024
@@ -23,6 +27,19 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def plot_signal(signal_data):
+    plt.figure()
+    plt.plot(signal_data)
+    plt.xlabel('Sample Index')
+    plt.ylabel('Signal Value')
+    plt.title('Signal Line Graph')
+    plt.grid(True)
+    plt.show()
+    print("Ok!")
+
+
 
 def generate_synthetic_wow_signal(num_samples, num_events):
     time = np.linspace(0, 1, num_samples)
@@ -123,8 +140,17 @@ def main(args):
     logging.info(f"Connected to {args.server_address}:{args.server_port}")
 
     try:
-        tuning_parameters = f"{args.sampling_frequency},{args.frequency},{args.gain},{args.lnb_offset}"
-        client_socket.sendall(tuning_parameters.encode())
+        params = {
+                'start_freq': args.frequency,
+                'end_freq': args.frequency,
+                'single_freq': True,
+                'sample_rate': 2.4e6,
+                'duration_seconds': 100
+        }
+        params_str = json.dumps(params)
+
+            # Encode the JSON string and send it over the socket
+        client_socket.sendall(params_str.encode())
 
         while True:
             os.system('sleep 1')
@@ -138,11 +164,12 @@ def main(args):
             except Exception as e:
                  logging.error(f"Error loading the model: {e}")
 
-
             samples = receive_samples_from_server(client_socket)
             samples_array = np.frombuffer(samples, dtype=np.uint8)
             lnb_removed_data = remove_lnb_offset(samples_array, args.sampling_frequency, args.lnb_offset)
             logging.info("LNB removed from the signal")
+            plt.ion()
+            plot_signal(samples)
 
             noise_removed_data = remove_noise(lnb_removed_data, args.sampling_frequency, args.cutoff_frequency)
             logging.info("Noise removed from the signal")

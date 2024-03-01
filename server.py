@@ -3,6 +3,7 @@ import socket
 from rtlsdr import RtlSdr
 import time
 import numpy as np
+import json
 
 def main(args):
     server_address = args.server_address
@@ -26,15 +27,23 @@ def main(args):
 
                 # Receive tuning parameters from the client
                 tuning_parameters_str = client_socket.recv(4096).decode()
-                tuning_parameters = eval(tuning_parameters_str)
-
+                tuning_parameters = json.loads(tuning_parameters_str)
+                print(tuning_parameters)
                 start_freq = float(tuning_parameters['start_freq'])
+
+                # Extract end_freq if provided
                 end_freq = tuning_parameters.get('end_freq')
                 if end_freq is not None:
-                  end_freq = float(end_freq)
-                single_freq = tuning_parameters.get('single_freq', False)  # Default to False if not provided                sample_rate = float(tuning_parameters['sample_rate'])
-                duration_seconds = int(tuning_parameters['duration_seconds'])
+                    end_freq = float(end_freq)
+
+                # Extract single_freq with default value of False if not provided
+                single_freq = tuning_parameters.get('single_freq', False)
+
+                # Extract sample_rate
                 sample_rate = float(tuning_parameters['sample_rate'])
+
+                # Extract duration_seconds
+                duration_seconds = int(tuning_parameters['duration_seconds'])
                 # Configure RTL-SDR
                 sdr.sample_rate = sample_rate
                 sdr.gain = 50 # Set gain to automatic
@@ -61,7 +70,11 @@ def main(args):
                             sdr.center_freq = freq
                             samples = sdr.read_samples(1024)
                             client_socket.sendall(samples.tobytes())
-
+                    if duration_seconds == 0:
+                            sdr.center_freq = freq
+                            samples = sdr.read_samples(1024)
+                            client_socket.sendall(samples.tobytes())
+                            
                 # Close client socket
                 client_socket.close()
             except ConnectionResetError:

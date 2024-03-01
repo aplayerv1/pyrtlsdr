@@ -67,9 +67,6 @@ def apply_rotation(data, rotation_angle):
     
     return rotated_data
 
-
-
-
 def calculate_velocity(delta_lambda, lambda_0, is_redshift=True):
     # Determine the sign based on redshift or blueshift
     sign = 1 if is_redshift else -1
@@ -113,23 +110,19 @@ def image_reconstruction(signal_data, shift_type='none', delta_lambda=None, lamb
     else:
         shifted_signal = signal_data  # no shift
 
-    # Reshape the signal data to a 2D array (1D data treated as single row)
-
     # Apply FFT if specified
     if apply_fft:
-        shifted_signal_2d = np.reshape(shifted_signal, (1, len(shifted_signal)))
+        # Ensure the signal is 2D before FFT
+        if len(shifted_signal.shape) == 1:
+            shifted_signal_2d = np.reshape(shifted_signal, (1, len(shifted_signal)))
+        else:
+            shifted_signal_2d = shifted_signal
 
         # Compute the FFT of the signal data
         fft_result = np.fft.fft2(shifted_signal_2d)
 
-        # Compute the magnitude spectrum (absolute values) of the FFT result
-        magnitude_spectrum = np.abs(fft_result)
-
-        # Compute the phase spectrum of the FFT result
-        phase_spectrum = np.angle(fft_result)
-
-        # Reconstruct the image from the magnitude and phase spectra
-        reconstructed_image = np.fft.ifft2(magnitude_spectrum * np.exp(1j * phase_spectrum)).real
+        # Reconstruct the image from the complex FFT result
+        reconstructed_image = np.fft.ifft2(fft_result).real
 
         # Apply inverse FFT if specified
         if inverse:
@@ -140,43 +133,89 @@ def image_reconstruction(signal_data, shift_type='none', delta_lambda=None, lamb
             reconstructed_signal = np.ravel(reconstructed_signal_2d)
 
             return reconstructed_signal
+        else:
+            return reconstructed_image
     else:
-        shifted_signal_2d = np.reshape(shifted_signal, (1, len(shifted_signal)))
-        reconstructed_image = shifted_signal_2d
+        return shifted_signal
 
-    return reconstructed_image
+def save_visualized_image2(reconstructed_image, output_dir, date, time, shift_type='none'):
+  with tqdm(total=1, desc='Generating Reconstructed Image:') as pbar:
+
+    # Create the output directory if it does not exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Generate filename with the extracted date, time, and shift type
+    image_filename = os.path.join(output_dir, f'reconstructed_image_{date}_{time}_{shift_type}.png')
+
+    # Ensure that the reconstructed image has a 2D shape
+    if len(reconstructed_image.shape) == 1:
+        # Dynamically determine the dimensions based on factors
+        total_elements = len(reconstructed_image)
+        sqrt_elements = int(np.sqrt(total_elements))
+
+        # Find the width and height for reshaping
+        for i in range(sqrt_elements, 0, -1):
+            if total_elements % i == 0:
+                width = i
+                height = total_elements // i
+                break
+
+        # Reshape the 1D array to a 2D array
+        reconstructed_image = np.reshape(reconstructed_image, (height, width))
+
+    # Visualize and save the reconstructed image
+    plt.figure(figsize=(10, 8))
+    plt.imshow(reconstructed_image, cmap='gray')  # Adjust cmap as per your image data
+    plt.colorbar(label='Intensity')
+    plt.title(f'Reconstructed Image ({shift_type.capitalize()} Shift)')
+    plt.xlabel('X-axis')
+    plt.ylabel('Y-axis')
+    plt.savefig(image_filename, bbox_inches='tight')
+    plt.close()
+
+    pbar.update(1)
+
 
 def compute_spectrogram(samples):
-    spectrogram, frequencies, times, _ = plt.specgram(samples, Fs=2.4e6)
-    return spectrogram
+    spectrogram, frequencies, times, _ = plt.specgram(samples, Fs=4.0e6)
+    return spectrogram, frequencies, times
 
-def save_plots_to_png(spectrogram, signal_strength, png_location, date, time):
-    try:
-        # Plot and save spectrogram
-        plt.figure()
-        plt.imshow(spectrogram.T, aspect='auto', cmap='viridis', origin='lower')
-        plt.title('Spectrogram')
-        plt.colorbar()
-        plt.savefig(f'{png_location}/spectrogram_{date}_{time}.png')
-        plt.close()
-                # Plot and save signal strength
-        plt.figure()
-        plt.plot(signal_strength)
-        plt.title('Signal Strength')
-        plt.xlabel('Sample Index')
-        plt.ylabel('Amplitude')
-        plt.savefig(f'{png_location}/signal_strength_{date}_{time}.png')
-        plt.close()
+def save_plots_to_png(spectrogram, signal_strength, frequencies, times, png_location, date, time):
+    with tqdm(total=1, desc='Generating Spectrogram & Signal_Strength: ') as pbar:
+        try:
+            # Plot and save spectrogram
+            plt.figure()
+            plt.imshow(spectrogram.T, aspect='auto', cmap='viridis', origin='lower',
+                       extent=[times[0], times[-1], frequencies[0], frequencies[-1]])
+            plt.title('Spectrogram')
+            plt.colorbar(label='Intensity')
+            plt.xlabel('Time (s)')
+            plt.ylabel('Frequency (Hz)')
+            plt.savefig(f'{png_location}/spectrogram_{date}_{time}.png')
+            plt.close()
 
-    except Exception as e:
-        print(f"Error occurred while saving plots: {e}")
+            frequency_bin_index = 0
+            signal_strength_frequency_bin = signal_strength[frequency_bin_index, :]
+
+            plt.figure()
+            plt.plot(signal_strength_frequency_bin)
+            plt.title(f'Signal Strength (Frequency Bin {frequency_bin_index})')
+            plt.xlabel('Sample Index')
+            plt.ylabel('Amplitude')
+            plt.savefig(f'{png_location}/signal_strength_frequency_{frequency_bin_index}_{date}_{time}.png')
+            plt.close()
+
+            pbar.update(1)  # Update progress bar
+
+        except Exception as e:
+            print(f"Error occurred while saving plots: {e}")
 
 def preprocess_data(data):
     # Replace negative values with zeros
     data[data < 0] = 0
     return data
 
-def bandpass_filter(signal_data, sampling_rate, center_frequency, bandwidth=100e6, filter_order=5):
+def bandpass_filter(signal_data, sampling_rate, center_frequency, bandwidth=400e6, filter_order=5):
     preprocessed_signal = preprocess_data(signal_data)
     # Define the Nyquist frequency
     nyquist_rate = sampling_rate / 2
@@ -315,6 +354,8 @@ def analyze_signal_strength(data, output_dir, date, time, shift_type='none'):
         plt.figure(figsize=(8, 6))
         plt.hist(signal_strength, bins=50, color='blue', alpha=0.7)
         plt.axvline(mean_strength, color='red', linestyle='dashed', linewidth=1, label=f'Mean: {mean_strength:.2f}')
+        plt.axvline(mean_strength + std_dev_strength, color='green', linestyle='dashed', linewidth=1, label=f'Std Dev: {std_dev_strength:.2f}')
+        plt.axvline(mean_strength - std_dev_strength, color='green', linestyle='dashed', linewidth=1)
         plt.xlabel('Signal Strength')
         plt.ylabel('Frequency')
         plt.title(f'Histogram of Signal Strength ({shift_type.capitalize()} Shift)')
@@ -365,7 +406,7 @@ def generate_preprocessed_heatmap(preprocessed_data, output_dir, date, time, shi
         heatmap_data = padded_data.reshape((num_rows, -1))
 
         # Create and save the heatmap image
-        plt.figure(figsize=(102, 57))
+        plt.figure(figsize=(12, 8))
         plt.imshow(heatmap_data, cmap='viridis', aspect='auto')
         plt.colorbar(label='Intensity')
         plt.title(f'Preprocessed Heatmap of RTL-SDR Data ({shift_type.capitalize()} Shift)')
@@ -378,18 +419,6 @@ def generate_preprocessed_heatmap(preprocessed_data, output_dir, date, time, shi
         plt.close()
 
         pbar.update(1)  # Update progress bar
-
-
-# def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):
-#     nyquist = sampling_frequency / 2
-#     lnb_normalized_frequency = lnb_offset_frequency / nyquist
-#     if lnb_normalized_frequency >= 1:
-#         lnb_normalized_frequency = 0.99
-#     elif lnb_normalized_frequency <= 0:
-#         lnb_normalized_frequency = 0.01
-#     b, a = signal.butter(5, lnb_normalized_frequency, btype='high')
-#     filtered_data = signal.filtfilt(b, a, signal_data)
-#     return filtered_data
 
 
 def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):
@@ -405,12 +434,23 @@ def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):
 
 
 def save_visualized_image(reconstructed_image, output_dir, date, time, shift_type='none'):
+  with tqdm(total=1, desc='Generating Reconstructed Image:') as pbar:  
     # Create the output directory if it does not exist
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate filename with the extracted date, time, and shift type
     image_filename = os.path.join(output_dir, f'reconstructed_image_{date}_{time}_{shift_type}.png')
+    # Determine the dimensions based on the length of the 1D array
+    total_elements = len(reconstructed_image)
+    sqrt_elements = int(np.sqrt(total_elements))
 
+    # Find the width and height for reshaping
+    for i in range(sqrt_elements, 0, -1):
+        if total_elements % i == 0:
+            width = i
+            height = total_elements // i
+            break
+    reconstructed_image = reconstructed_image.reshape((height, width))
     # Visualize and save the reconstructed image
     plt.figure(figsize=(10, 8))
     plt.imshow(reconstructed_image, cmap='gray')  # Adjust cmap as per your image data
@@ -421,8 +461,7 @@ def save_visualized_image(reconstructed_image, output_dir, date, time, shift_typ
     plt.savefig(image_filename, bbox_inches='tight')
     plt.close()
 
-    print(f"Reconstructed image saved as: {image_filename}")
-
+    pbar.update(1)
 
 
 def main(args):
@@ -483,17 +522,16 @@ def main(args):
         save_visualized_image(reconstructed_image, args.output, date, time, shift_type='both')
         reconstructed_image = image_reconstruction(preprocessed_data, shift_type='none', delta_lambda=delta_lambda, lambda_0=lambda_0)
         save_visualized_image(reconstructed_image, args.output, date, time, shift_type='none')
-        reconstructed_image = image_reconstruction(preprocessed_data, shift_type='redshift', delta_lambda=delta_lambda, lambda_0=lambda_0, apply_fft=True, inverse=False)
-        save_visualized_image(reconstructed_image, args.output, date, time, shift_type='FFT')
-        reconstructed_image = image_reconstruction(preprocessed_data, shift_type='redshift', delta_lambda=delta_lambda, lambda_0=lambda_0, apply_fft=False, inverse=True)
-        save_visualized_image(reconstructed_image, args.output, date, time, shift_type='I')
+        reconstructed_image_fft = image_reconstruction(preprocessed_data, shift_type='none', delta_lambda=delta_lambda, lambda_0=lambda_0, apply_fft=True, inverse=True)
+        save_visualized_image2(reconstructed_image_fft, args.output, date, time, shift_type='FFT')
+        reconstructed_image = image_reconstruction(preprocessed_data, shift_type='none', delta_lambda=delta_lambda, lambda_0=lambda_0, apply_fft=False, inverse=True)
+        save_visualized_image2(reconstructed_image, args.output, date, time, shift_type='I')
 
+        apfe = apply_filter_and_enhancement(binary_data_no_lnb)
 
-
-        apfe = apply_filter_and_enhancement(data)
-
-        spectrogram = compute_spectrogram(apfe)
+        spectrogram, frequencies, times = compute_spectrogram(apfe)      
         signal_strength = np.abs(spectrogram)
+
 
         spectrogram_data.append(spectrogram)
         signal_strength_data.append(signal_strength)
@@ -501,10 +539,8 @@ def main(args):
         spectrogram_data = np.array(spectrogram_data)
         signal_strength_data = np.array(signal_strength_data)
 
-
-
-        save_plots_to_png(spectrogram_data[-1], signal_strength_data[-1],args.output, date, time)
-        
+        # Now, you can call the function save_plots_to_png to save the plots
+        save_plots_to_png(spectrogram, signal_strength, frequencies, times, args.output, date, time)
 
         end_time = tm.time()
         total_time = (end_time - start_time_begin)/60
@@ -518,7 +554,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process RTL-SDR binary data and generate heatmap and signal strength plots.')
     parser.add_argument('-i', '--input', type=str, help='Path to RTL-SDR binary file')
     parser.add_argument('-o', '--output', type=str, default='output', help='Output directory for PNG files (default: output)')
-    parser.add_argument('-s', '--sampling_rate', type=float, default=2.4e6, help='Sampling rate in Hz (default: 2.4e6)')
+    parser.add_argument('-s', '--sampling_rate', type=float, default=4.0e6, help='Sampling rate in Hz (default: 2.4e6)')
     parser.add_argument('-c', '--center_frequency', type=float, default=1420.40e6, help='Center frequency in Hz (default: 1420.30e6)')
     parser.add_argument('-l', '--lnb-offset', type=float, default=9750e6, help='LNB offset frequency in Hz')
     parser.add_argument('-g', '--gain-factor', type=float, default=1.0, help='Digital gain factor')

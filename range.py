@@ -4,6 +4,7 @@ import numpy as np
 import time
 import socket
 from astropy.io import fits
+import json
 
 def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate, duration_seconds, output_dir):
     # Connect to the remote server
@@ -19,7 +20,13 @@ def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate,
         'sample_rate': sample_rate,
         'duration_seconds': duration_seconds  # Include duration_seconds in the parameters
     }
-    client_socket.sendall(str(params).encode())
+    # Convert the dictionary to a JSON string
+    params_str = json.dumps(params)
+
+    # Encode the JSON string and send it over the socket
+    client_socket.sendall(params_str.encode())
+
+    # client_socket.sendall(str(params).encode())
     
     # Receive data from the server and save it to a FITS file
     data = b''  # Initialize an empty byte string to store the received data
@@ -61,7 +68,7 @@ if __name__ == "__main__":
     parser.add_argument('--start-freq', type=float, help='Start frequency in Hz', required=True)
     parser.add_argument('--end-freq', type=float, help='End frequency in Hz')
     parser.add_argument('--single-freq', action='store_true', help='Capture data for a single frequency')
-    parser.add_argument('--sample-rate', type=float, help='Sample rate in Hz', default=2.4e6)
+    parser.add_argument('--sample-rate', type=float, help='Sample rate in Hz', default=4.0e6)
     parser.add_argument('--duration', type=int, help='Duration of capture in seconds', default=60)
     parser.add_argument('--output-dir', type=str, help='Directory to save the output file', default='./')
     args = parser.parse_args()

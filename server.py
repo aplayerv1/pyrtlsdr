@@ -1,6 +1,12 @@
 import argparse
 import socket
-from rtlsdr import RtlSdr
+import rtlsdr
+import time
+import numpy as np
+import json
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 def main(args):
     server_address = args.server_address
@@ -8,47 +14,80 @@ def main(args):
     lnb_frequency = args.lnb_frequency
 
     # Set up RTL-SDR
-    sdr = RtlSdr()
+    sdr = rtlsdr.RtlSdr()
 
     try:
         # Start the server
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.bind((server_address, server_port))
         server_socket.listen(1)
-        print(f"Server listening on {server_address}:{server_port}")
+        logging.info(f"Server listening on {server_address}:{server_port}")
 
         while True:
-            client_socket, client_address = server_socket.accept()
-            print(f"Connection established with {client_address}")
+            try:
+                client_socket, client_address = server_socket.accept()
+                logging.info(f"Connection established with {client_address}")
 
-            # Receive tuning parameters from the client
-            tuning_parameters = client_socket.recv(1024).decode().split(',')
-            sample_rate = float(tuning_parameters[0])
-            center_frequency = float(tuning_parameters[1])
-            gain = float(tuning_parameters[2])  # Convert gain to float
+                # Receive tuning parameters from the client
+                tuning_parameters_str = client_socket.recv(4096).decode()
+                tuning_parameters = json.loads(tuning_parameters_str)
+                logging.info(tuning_parameters)
+                start_freq = float(tuning_parameters['start_freq'])
 
-            # Configure RTL-SDR
-            sdr.sample_rate = sample_rate
-            sdr.center_freq = center_frequency - lnb_frequency  # Adjust the center frequency with LNB offset
-            sdr.gain = gain
+                # Extract end_freq if provided
+                end_freq = tuning_parameters.get('end_freq')
+                if end_freq is not None:
+                    end_freq = float(end_freq)
 
+                # Extract single_freq with default value of False if not provided
+                single_freq = tuning_parameters.get('single_freq', False)
 
-            # Stream data to the client
-            while True:
-                samples = sdr.read_samples(1024)
-                print(samples)
-                try:
-                    client_socket.sendall(samples)
-                    print("Stream data:", samples)  # Print stream data
-                except BrokenPipeError:
-                    print("Client disconnected.")
-                    break
-                except ConnectionResetError:
-                    print("Client disconnected.")
-                    break
+                # Extract sample_rate
+                sample_rate = float(tuning_parameters['sample_rate'])
 
+                # Extract duration_seconds
+                duration_seconds = tuning_parameters.get('duration_seconds') 
+                
+                # Configure RTL-SDR
+                sdr.sample_rate = sample_rate
+                sdr.gain = 'auto'
+                if single_freq:
+                    sdr.center_freq = start_freq  # Adjust the center frequency with LNB offset
+                else:
+                    # Capture data for a range of frequencies
+                    for freq in np.arange(start_freq, end_freq + 1e6, 1e6):  # Step of 1 MHz
+                        sdr.center_freq = freq  # Adjust the center frequency with LNB offset
+                        samples = sdr.read_samples(1024)
+                        client_socket.sendall(samples.tobytes())  # Send samples to the client as bytes
+                start_time = time.time()         
+                # Start streaming data
+                while True:
+                    if single_freq:
+                        # Capture data for a single frequency
+                        sdr.center_freq = start_freq  # Set the SDR to the starting frequency
+                        samples = sdr.read_samples(1024)  # Read 1024 samples from the RTL-SDR device
+                        client_socket.sendall(samples.tobytes())  # Send samples to the client as bytes
+                    else:
+                        # Capture data for a range of frequencies
+                        for freq in np.arange(start_freq, end_freq + 1e6, 1e6):  # Step of 1 MHz
+                            sdr.center_freq = freq  # Set the SDR to the current frequency in the range
+                            samples = sdr.read_samples(1024)  # Read 1024 samples from the RTL-SDR device
+                            client_socket.sendall(samples.tobytes())  # Send samples to the client as bytes
+                            
+                            # Break the loop if the duration exceeds the specified time
+                            if duration_seconds and (time.time() - start_time > duration_seconds):
+                                break
+                    # Check if the duration has been exceeded outside the inner loop as well
+                    if duration_seconds and (time.time() - start_time > duration_seconds):
+                        break
+                # Close client socket
+                client_socket.close()
+            except ConnectionResetError:
+                logging.info("Client disconnected.")
+                client_socket.close()
+                continue
     except KeyboardInterrupt:
-        print("Keyboard interrupt detected. Closing server.")
+        logging.info("Keyboard interrupt detected. Closing server.")
     finally:
         sdr.close()
         server_socket.close()

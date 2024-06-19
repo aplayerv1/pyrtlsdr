@@ -9,6 +9,7 @@ declare -a keep_files=(
     "server.py"
     "ai.sh"
     "start.sh"
+    "aggragate.sh"
 )
 
 # Directory where Python scripts are located

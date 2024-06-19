@@ -46,6 +46,7 @@ def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate,
         # Append the received data to the byte string
         data += received_data
 
+<<<<<<< HEAD
     data_array = np.frombuffer(data, dtype=np.uint8)
 
     # Determine dimensions of the data array
@@ -58,6 +59,14 @@ def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate,
         hdu.header['NAXIS'] = len(data_shape)
         for i, dim in enumerate(data_shape):
             hdu.header[f'NAXIS{i+1}'] = dim
+=======
+    # Convert the byte string to a NumPy array
+    data_array = np.frombuffer(data, dtype=np.uint8)
+
+    # Now create the FITS file and save the data
+    with fits.open(fits_filename, mode='append') as hdul:
+        hdu = fits.PrimaryHDU(data_array, header=header)
+>>>>>>> 0858e9ca9b448c30a3baea59d8a38216c90a9f50
         hdul.append(hdu)
 
     print(f"Data saved to: {fits_filename}")
@@ -74,7 +83,11 @@ if __name__ == "__main__":
     parser.add_argument('--start-freq', type=float, help='Start frequency in Hz', required=True)
     parser.add_argument('--end-freq', type=float, help='End frequency in Hz')
     parser.add_argument('--single-freq', action='store_true', help='Capture data for a single frequency')
+<<<<<<< HEAD
     parser.add_argument('--sample-rate', type=float, help='Sample rate in Hz', default=2.4e6)
+=======
+    parser.add_argument('--sample-rate', type=float, help='Sample rate in Hz', default=4.0e6)
+>>>>>>> 0858e9ca9b448c30a3baea59d8a38216c90a9f50
     parser.add_argument('--duration', type=int, help='Duration of capture in seconds', default=60)
     parser.add_argument('--output-dir', type=str, help='Directory to save the output file', default='./')
     args = parser.parse_args()

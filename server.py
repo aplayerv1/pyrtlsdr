@@ -1,5 +1,6 @@
 import argparse
 import socket
+<<<<<<< HEAD
 import rtlsdr
 import time
 import numpy as np
@@ -7,6 +8,12 @@ import json
 import logging
 
 logging.basicConfig(level=logging.INFO)
+=======
+from rtlsdr import RtlSdr
+import time
+import numpy as np
+import json
+>>>>>>> 0858e9ca9b448c30a3baea59d8a38216c90a9f50
 
 def main(args):
     server_address = args.server_address
@@ -26,12 +33,20 @@ def main(args):
         while True:
             try:
                 client_socket, client_address = server_socket.accept()
+<<<<<<< HEAD
                 logging.info(f"Connection established with {client_address}")
+=======
+                print(f"Connection established with {client_address}")
+>>>>>>> 0858e9ca9b448c30a3baea59d8a38216c90a9f50
 
                 # Receive tuning parameters from the client
                 tuning_parameters_str = client_socket.recv(4096).decode()
                 tuning_parameters = json.loads(tuning_parameters_str)
+<<<<<<< HEAD
                 logging.info(tuning_parameters)
+=======
+                print(tuning_parameters)
+>>>>>>> 0858e9ca9b448c30a3baea59d8a38216c90a9f50
                 start_freq = float(tuning_parameters['start_freq'])
 
                 # Extract end_freq if provided
@@ -46,17 +61,25 @@ def main(args):
                 sample_rate = float(tuning_parameters['sample_rate'])
 
                 # Extract duration_seconds
+<<<<<<< HEAD
                 duration_seconds = tuning_parameters.get('duration_seconds') 
                 
                 # Configure RTL-SDR
                 sdr.sample_rate = sample_rate
                 sdr.gain = 'auto'
+=======
+                duration_seconds = int(tuning_parameters['duration_seconds'])
+                # Configure RTL-SDR
+                sdr.sample_rate = sample_rate
+                sdr.gain = 50 # Set gain to automatic
+>>>>>>> 0858e9ca9b448c30a3baea59d8a38216c90a9f50
                 if single_freq:
                     sdr.center_freq = start_freq  # Adjust the center frequency with LNB offset
                 else:
                     # Capture data for a range of frequencies
                     for freq in np.arange(start_freq, end_freq + 1e6, 1e6):  # Step of 1 MHz
                         sdr.center_freq = freq  # Adjust the center frequency with LNB offset
+<<<<<<< HEAD
                         samples = sdr.read_samples(1024)
                         client_socket.sendall(samples.tobytes())  # Send samples to the client as bytes
                 start_time = time.time()         
@@ -84,6 +107,34 @@ def main(args):
                 client_socket.close()
             except ConnectionResetError:
                 logging.info("Client disconnected.")
+=======
+                        # Here, you can read samples and process them
+                # Start streaming data
+                start_time = time.time()
+                while time.time() - start_time < duration_seconds:
+                    if single_freq:
+                        # Capture data for a single frequency
+                        sdr.center_freq = start_freq
+                        samples = sdr.read_samples(1024)  # Read samples from the RTL-SDR device
+                        client_socket.sendall(samples.tobytes())  # Send samples to the client
+                    else:
+                        # Capture data for a range of frequencies
+                        for freq in range(int(start_freq), int(end_freq) + 1):
+                            if time.time() - start_time >= duration_seconds:
+                                break  # Exit the loop if duration exceeds
+                            sdr.center_freq = freq
+                            samples = sdr.read_samples(1024)
+                            client_socket.sendall(samples.tobytes())
+                    if duration_seconds == 0:
+                            sdr.center_freq = freq
+                            samples = sdr.read_samples(1024)
+                            client_socket.sendall(samples.tobytes())
+                            
+                # Close client socket
+                client_socket.close()
+            except ConnectionResetError:
+                print("Client disconnected.")
+>>>>>>> 0858e9ca9b448c30a3baea59d8a38216c90a9f50
                 client_socket.close()
                 continue
     except KeyboardInterrupt:

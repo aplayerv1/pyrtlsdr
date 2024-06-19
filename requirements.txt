@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 matplotlib
 tqdm
 astropy
@@ -9,3 +10,21 @@ tensorflow==2.6.0
 keras==2.6.0
 pywavelets==1.1.1
 scikit-image
+=======
+argparse
+astropy.io
+cv2
+datetime
+gc
+matplotlib.pyplot
+numpy
+os
+pywt
+re
+scipy
+scipy.ndimage
+scipy.signal
+skimage
+time
+tqdm
+>>>>>>> 0858e9ca9b448c30a3baea59d8a38216c90a9f50

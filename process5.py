@@ -211,25 +211,30 @@ def save_spectra(freq, fft_values, peaks, troughs, output_dir, date, time):
     pbar.update(1)
 
 def save_spectra2(freq, fft_values, peaks, troughs, output_dir, date, time):
-  with tqdm(total=1, desc='Generating Spectra:') as pbar:
-  
-    os.makedirs(output_dir, exist_ok=True)
-    magnitude = np.abs(fft_values)
-    plt.figure(figsize=(14, 7))
-    plt.plot(freq, magnitude, label='Spectrum', color='black')
-    if peaks.size > 0:
-        plt.plot(freq[peaks], magnitude[peaks], 'ro', label='Emission Lines')
-    if troughs.size > 0:
-        plt.plot(freq[troughs], magnitude[troughs], 'bo', label='Absorption Lines')
-    plt.xlabel('Frequency (Hz)')
-    plt.ylabel('Magnitude')
-    plt.title('Emission and Absorption Spectra')
-    plt.legend(loc="upper right")
-    plt.xlim([0, max(freq)])
-    output_path = os.path.join(output_dir, f'spectra2_{date}_{time}.png')
-    plt.savefig(output_path)
-    plt.close()
-    pbar.update(1)
+    with tqdm(total=1, desc='Generating Spectra:') as pbar:
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Apply preprocessing to the FFT values
+        enhanced_fft_values = preprocess_fft_values(fft_values)
+        
+        plt.figure(figsize=(14, 7))
+        plt.plot(freq, enhanced_fft_values, label='Spectrum', color='black')
+        
+        if peaks.size > 0:
+            plt.plot(freq[peaks], enhanced_fft_values[peaks], 'ro', label='Emission Lines')
+        if troughs.size > 0:
+            plt.plot(freq[troughs], enhanced_fft_values[troughs], 'bo', label='Absorption Lines')
+        
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('Magnitude')
+        plt.title('Emission and Absorption Spectra')
+        plt.legend(loc="upper right")
+        plt.xlim([0, max(freq)])
+        output_path = os.path.join(output_dir, f'spectra2_{date}_{time}.png')
+        plt.savefig(output_path)
+        plt.close()
+        pbar.update(1)
+
 
 
 def save_plots_to_png(spectrogram, signal_strength, frequencies, times, png_location, date, time):
@@ -520,25 +525,33 @@ def generate_lofar_image(signal_data, output_dir, date, time):
     with tqdm(total=1, desc='Generating LOFAR Image:') as pbar:
         os.makedirs(output_dir, exist_ok=True)
         try:
-            # Placeholder for LOFAR image generation logic
-            
-            # Simulate some image data based on signal_data
-            # In a real scenario, this would be replaced with actual LOFAR data processing
+            # Determine the size of the image
             image_size = int(np.sqrt(len(signal_data)))
             if image_size * image_size < len(signal_data):
                 image_size += 1
             
+            # Create the LOFAR image data array
             lofar_image_data = np.zeros((image_size, image_size))
             lofar_image_data.flat[:len(signal_data)] = signal_data[:image_size * image_size]
             lofar_image_data = lofar_image_data[:image_size, :image_size]
 
+            # Generate the plot
             plt.figure(figsize=(10, 8))
             plt.imshow(lofar_image_data, cmap='inferno', aspect='auto')
             plt.colorbar(label='Intensity')
+
+            # Add contour levels
+            levels = np.linspace(np.min(lofar_image_data), np.max(lofar_image_data), 10)
+            plt.contour(lofar_image_data, levels=levels, colors='white', linewidths=0.5)
+
+            # Add title and labels
             plt.title(f'LOFAR Image ({date} {time})')
             plt.xlabel('X-axis')
             plt.ylabel('Y-axis')
-            plt.savefig(os.path.join(output_dir, f'lofar_image_{date}_{time}.png'))
+
+            # Save the image
+            output_file = os.path.join(output_dir, f'lofar_image_{date}_{time}.png')
+            plt.savefig(output_file)
             plt.close()
 
             pbar.update(1)

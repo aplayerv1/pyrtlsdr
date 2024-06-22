@@ -2,7 +2,7 @@
 
 srf=2.4e6
 chunk=1024
-
+workers=4
 # Navigate to the working directory
 cd /home/server/rtl/pyrtl
 
@@ -15,7 +15,7 @@ mkdir -p "$output_dir"
 
 # # Aggregate data
 echo "Starting Aggregate"
-python3 aggregate.py -i /mnt/nas/tests/capture -o "$output_dir"
+python3 aggragate.py -i /mnt/nas/tests/capture -o "$output_dir"
 
 # Check if the aggregation was successful
 if [ $? -ne 0 ]; then
@@ -86,7 +86,7 @@ with fits.open(fits_file) as hdul:
         fi
 
         echo "Starting Heatmap Process for $input_file"
-        python3 heatmap.py -i "$input_file" -o "$output_file" --fs "$srf" --chunk-size "$chunk" --num-workers 16
+        python3 heatmap.py -i "$input_file" -o "$output_file" --fs "$srf" --chunk-size "$chunk" --num-workers $workers
         if [ $? -ne 0 ]; then
             echo "Heatmap processing failed for $input_file, exiting."
             exit 1

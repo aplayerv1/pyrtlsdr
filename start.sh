@@ -9,10 +9,10 @@ sfreq=1420.40e6
 duration=1200
 srf=2.4e6
 tol=1.6e6
-chunk=2048
+chunk=1024
 ip=10.10.1.143
 port=8885
-workers=4
+workers=24
 
 # Capture data over a range of frequencies
 echo "Range $ffreq to $lfreq"

@@ -6,6 +6,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import gc
 import os
+import psutil
 from astropy.io import fits
 import scipy.signal
 import datetime
@@ -26,7 +27,7 @@ def read_fits_directory(directory):
 
 def read_fits_chunk(filename, chunk_size):
     """Read FITS file in chunks."""
-    with fits.open(filename) as hdulist:
+    with fits.open(filename, memmap=True) as hdulist:
         data = hdulist[0].data.astype(np.float64)
         for i in range(0, len(data), chunk_size):
             yield data[i:i+chunk_size]
@@ -61,7 +62,7 @@ def create_model():
 def process_samples(samples, fs, lnb_offset, low_cutoff, high_cutoff):
     """Process the received samples"""
     # Remove LNB effect
-    processed_samples = remove_lnb_effect(samples, fs, lnb_offset,notch_width)
+    processed_samples = remove_lnb_effect(samples, fs, lnb_offset, notch_width)
 
     # Apply bandpass filter
     nyq_rate = fs / 2.0
@@ -124,11 +125,10 @@ def plot_signal_strength(signal_strength, filename):
     plt.savefig(filename)
     plt.close()
 
-def plot_spectrogram(signal, sample_rate, title='Spectrogram'):
+def plot_spectrogram(signal, sample_rate, nperseg, title='Spectrogram'):
     """Plot the spectrogram."""
     datime = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f'spectrograph_{datime}.png'
-    nperseg = 1024
     noverlap = nperseg // 2
     f, t, Sxx = scipy.signal.spectrogram(signal, fs=sample_rate, nperseg=nperseg, noverlap=noverlap)
     fig = plt.figure()
@@ -140,11 +140,23 @@ def plot_spectrogram(signal, sample_rate, title='Spectrogram'):
     plt.tight_layout()
     fig.savefig(filename, dpi=300)
 
+def set_cpu_affinity(cores):
+    """Set CPU affinity for the process."""
+    p = psutil.Process(os.getpid())
+    p.cpu_affinity(cores)
+
 def main():
     parser = argparse.ArgumentParser(description='Process FITS files from a directory.')
     parser.add_argument('-d', '--directory', type=str, required=True, help='Directory containing FITS files')
     parser.add_argument('-c', '--chunk-size', type=int, default=1024, help='Chunk size for reading FITS files')
+    parser.add_argument('-n', '--num-cores', type=int, default=None, help='Number of CPU cores to use')
+    parser.add_argument('--nperseg', type=int, default=1024, help='Number of samples per segment for spectrogram')
     args = parser.parse_args()
+
+    if args.num_cores:
+        cores = list(range(args.num_cores))
+        set_cpu_affinity(cores)
+        logging.info(f'Setting CPU affinity to cores: {cores}')
 
     fits_files = read_fits_directory(args.directory)
     model_weights_file = 'signal_classifier_weights.h5'
@@ -163,7 +175,6 @@ def main():
         logging.info(f'Total chunks in file: {total_chunks}')
         
         for idx, chunk in enumerate(read_fits_chunk(fits_file, args.chunk_size)):
-            # processed_samples = remove_lnb_effect(chunk, fs, lnb_offset, notch_width)
             low_cutoff = (1420.2e6 - notch_freq) / (fs / 2.0)
             high_cutoff = (1420.6e6 - notch_freq) / (fs / 2.0)
             processed_samples = process_samples(chunk, fs, lnb_offset, low_cutoff, high_cutoff)
@@ -172,7 +183,7 @@ def main():
             if prediction:
                 logging.info("Signal detected! Creating signal strength plot...")
                 plot_signal_strength(processed_samples, filename='signal_strength_plot.png')
-                plot_spectrogram(processed_samples, fs, title='Detected Signal Spectrogram')
+                plot_spectrogram(processed_samples, fs, args.nperseg, title='Detected Signal Spectrogram')
             else:
                 logging.info("No signal detected.")
 

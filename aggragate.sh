@@ -2,7 +2,7 @@
 
 srf=2.4e6
 chunk=1024
-workers=4
+workers=24
 # Navigate to the working directory
 cd /home/server/rtl/pyrtl
 
@@ -86,7 +86,7 @@ with fits.open(fits_file) as hdul:
         fi
 
         echo "Starting Heatmap Process for $input_file"
-        python3 heatmap.py -i "$input_file" -o "$output_file" --fs "$srf" --chunk-size "$chunk" --num-workers $workers
+        python3 heatmap.py -i "$input_file" -o "$output_file" --fs "$srf"  --num-workers $workers
         if [ $? -ne 0 ]; then
             echo "Heatmap processing failed for $input_file, exiting."
             exit 1

@@ -11,7 +11,7 @@ import re
 
 def read_fits_chunk(filename, chunk_size, chunk_idx):
     """Read a specific chunk of data from a FITS file."""
-    with fits.open(filename) as hdulist:
+    with fits.open(filename, memmap=True) as hdulist:
         data = hdulist[0].data.astype(np.float64)
         start_idx = chunk_idx * chunk_size
         end_idx = min(start_idx + chunk_size, len(data))
@@ -26,10 +26,10 @@ def denoise_signal(signal, cutoff_freq, fs):
     return y
 
 def process_chunk(args):
-    filename, chunk_size, chunk_idx, fs, cutoff_freq = args
+    filename, chunk_size, chunk_idx, fs, cutoff_freq, nperseg = args
     data_chunk = read_fits_chunk(filename, chunk_size, chunk_idx)
-    denoised_chunk = denoise_signal(data_chunk, cutoff_freq, fs)
-    f, t, Sxx = spectrogram(denoised_chunk, fs=fs, nperseg=1024, noverlap=512)
+    # denoised_chunk = denoise_signal(data_chunk, cutoff_freq, fs)
+    f, t, Sxx = spectrogram(data_chunk, fs=fs, nperseg=nperseg, noverlap=nperseg//2, scaling='density', mode='magnitude')
     return f, t + chunk_idx * (len(data_chunk) / fs), Sxx
 
 def extract_datetime_from_filename(filename):
@@ -48,8 +48,9 @@ def main():
     parser.add_argument('-o', '--output', type=str, required=True, help='Output directory for the spectrogram image')
     parser.add_argument('--fs', type=float, default=2.4e6, help='Sampling frequency in Hz (default: 2.4e6)')
     parser.add_argument('--chunk-size', type=int, default=1024*1024, help='Chunk size for reading FITS file (default: 1048576)')
-    parser.add_argument('--num-workers', type=int, default=4, help='Number of worker processes (default: 4)')
+    parser.add_argument('--num-workers', type=int, default=mp.cpu_count(), help='Number of worker processes (default: all CPU cores)')
     parser.add_argument('--cutoff-freq', type=float, default=1e6, help='Cutoff frequency for low-pass filter (default: 1e6)')
+    parser.add_argument('--nperseg', type=int, default=2048, help='Length of each segment for the spectrogram (default: 2048)')
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -62,12 +63,12 @@ def main():
     formatted_datetime = datetime_from_filename.strftime("%Y%m%d_%H%M%S")
 
     # Get the total number of chunks
-    with fits.open(args.input) as hdulist:
+    with fits.open(args.input, memmap=True) as hdulist:
         data_size = len(hdulist[0].data)
     num_chunks = data_size // args.chunk_size + (data_size % args.chunk_size > 0)
 
     # Create arguments for multiprocessing
-    tasks = [(args.input, args.chunk_size, chunk_idx, args.fs, args.cutoff_freq) for chunk_idx in range(num_chunks)]
+    tasks = [(args.input, args.chunk_size, chunk_idx, args.fs, args.cutoff_freq, args.nperseg) for chunk_idx in range(num_chunks)]
 
     # Use multiprocessing to process chunks in parallel and add a progress bar
     with mp.Pool(args.num_workers) as pool:
@@ -81,7 +82,7 @@ def main():
     # Generate and save the combined spectrogram
     output_path = os.path.join(args.output, f"heatmap_{formatted_datetime}.png")
 
-    plt.figure(figsize=(20, 10))  # Adjust figure size if needed
+    plt.figure(figsize=(20, 10))  # Adjust figure size to match the expected heatmap dimensions
     plt.imshow(10 * np.log10(combined_spectrogram), aspect='auto', 
                extent=[combined_times.min(), combined_times.max(), combined_frequencies.min(), combined_frequencies.max()], 
                cmap='viridis', origin='lower')  # Ensure origin is set to 'lower' to match the reference

@@ -12,7 +12,7 @@ tol=1.6e6
 chunk=1024
 ip=10.10.1.143
 port=8885
-workers=4
+workers=24
 
 # Capture data over a range of frequencies
 echo "Range $ffreq to $lfreq"
@@ -54,11 +54,11 @@ for file in *.fits; do
 
         
         echo "Starting Processing"
-        python3 process5.py -f "raw/$pf" -i "raw/${filename_w_408}.fits" -o "images/${filename_w_408}/" --start_time 0 --end_time $duration --tolerance $tol --chunk_size $chunk --fs $srf
+        # python3 process5.py -f "raw/$pf" -i "raw/${filename_w_408}.fits" -o "images/${filename_w_408}/" --start_time 0 --end_time $duration --tolerance $tol --chunk_size $chunk --fs $srf
 
         # Generate Heatmap
         echo "Starting Heatmap"
-        python3 heatmap.py -i "raw/${filename_w_408}.fits" -o "images/${filename_w_408}/" --fs $srf --chunk-size $chunk --num-workers $workers
+        python3 heatmap.py -i "raw/${filename_w_408}.fits" -o "images/${filename_w_408}/" --fs $srf --num-workers $workers --nperseg 2048
 
         # Clean up temporary files
         rm -r /home/server/rtl/pyrtl/raw/*.txt
@@ -77,9 +77,9 @@ for file in *.fits; do
 
 
         # Clean up raw and images directories
-        rm -r /home/server/rtl/pyrtl/raw/*
-        rm -r /home/server/rtl/pyrtl/images/*
-        rm -r /home/server/rtl/pyrtl/sound/*
+#        rm -r /home/server/rtl/pyrtl/raw/*
+#        rm -r /home/server/rtl/pyrtl/images/*
+#        rm -r /home/server/rtl/pyrtl/sound/*
 
         # Navigate back to the original directory for the next iteration
         cd -

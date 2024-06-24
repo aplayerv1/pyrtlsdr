@@ -1,9 +1,6 @@
 #!/bin/bash
-
-source activate tf_env
-
 cd /home/server/rtl/pyrtl
 
-python3 aim.py -d /mnt/nas/tests/capture/ -c 1024
+~/anaconda3/envs/tf_env/bin/python3 aim.py -d /mnt/nas/tests/capture/ -c 1024 -n 1
 
 

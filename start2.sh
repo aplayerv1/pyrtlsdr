@@ -14,6 +14,12 @@ ip=10.10.1.143
 port=8885
 workers=24
 
+# Configuration variables for rsync
+nas_base_dir="/mnt/nas/tests"
+nas_images_dir="$nas_base_dir/processed"
+nas_raw_dir="$nas_base_dir/capture"
+nas_sound_dir="$nas_base_dir/sound"
+
 # Capture data over a range of frequencies
 echo "Range $ffreq to $lfreq"
 python3 range.py $ip $port --start-freq $ffreq --end-freq $lfreq --duration $duration --sample-rate $srf
@@ -49,10 +55,8 @@ for file in *.fits; do
         echo "Starting Sound"
         pf="${filename_w_408}.fits.txt"  # Assuming correct pattern for processed file
 
+        python3 tosound.py "raw/$pf" "sound/${filename_w_408}.wav" --samplerate 48000
 
-        python tosound.py "raw/$pf" "sound/${filename_w_408}.wav" --samplerate 48000 
-
-        
         echo "Starting Processing"
         # python3 process5.py -f "raw/$pf" -i "raw/${filename_w_408}.fits" -o "images/${filename_w_408}/" --start_time 0 --end_time $duration --tolerance $tol --chunk_size $chunk --fs $srf
 
@@ -67,21 +71,17 @@ for file in *.fits; do
         cd /home/server/rtl/pyrtl
 
         # Sync processed images to NAS
-        rsync -avh --update images/ /mnt/nas/tests/processed/
+        rsync -avh --update images/ "$nas_images_dir/"
 
         # Sync raw data to NAS
-        rsync -avh --update raw/ /mnt/nas/tests/capture/
+        rsync -avh --update raw/ "$nas_raw_dir/"
 
-        #Sybc sound data to NAS
-        rsync -avh --update sound/ /mnt/nas/tests/sound/
-
+        # Sync sound data to NAS
+        rsync -avh --update sound/ "$nas_sound_dir/"
 
         # Clean up raw and images directories
-#        rm -r /home/server/rtl/pyrtl/raw/*
-#        rm -r /home/server/rtl/pyrtl/images/*
-#        rm -r /home/server/rtl/pyrtl/sound/*
-
-        # Navigate back to the original directory for the next iteration
-        cd -
+        find /home/server/rtl/pyrtl/raw/ -type f -mtime +1 -exec rm -r {} \;
+        find /home/server/rtl/pyrtl/images/ -type f -mtime +1 -exec rm -r {} \;
+        find /home/server/rtl/pyrtl/sound/ -type f -mtime +1 -exec rm -r {} \;
     fi
 done

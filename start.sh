@@ -9,8 +9,8 @@ sfreq=1420.40e6
 duration=1200
 srf=2.4e6
 tol=1.6e6
-chunk=1024
-ip=10.10.1.143
+chunk=20480
+ip=10.10.1.17
 port=8885
 workers=24
 
@@ -47,7 +47,7 @@ for file in *.fits; do
         python3 tosound.py "raw/$pf" "sound/${filename_w}.wav" --samplerate 48000 
 
         echo "Starting Processing"
-        python3 process5.py -f raw/$pf -i raw/$filename_w".fits" -o images/$filename_w/ --start_time 0 --end_time $duration --tolerance $tol --chunk_size $chunk --fs $srf
+        python3 process5.py -f raw/$pf -i raw/$filename_w".fits" -o images/$filename_w/ --start_time 0 --end_time $duration --tolerance $tol --chunk_size $chunk --fs $srf --center-frequency $sfreq
 
         echo "Starting Heatmap"
         python3 heatmap.py -i raw/$filename_w".fits" -o images/$filename_w/ --fs $srf --chunk-size $chunk --num-workers $workers
@@ -56,19 +56,8 @@ for file in *.fits; do
 
         cd /home/server/rtl/pyrtl
 
-        # Sync processed images to NAS
-        rsync -avh --update images/ "$nas_images_dir/"
 
-        # Sync raw data to NAS
-        rsync -avh --update raw/ "$nas_raw_dir/"
 
-        # Sync sound data to NAS
-        rsync -avh --update sound/ "$nas_sound_dir/"
-
-        # Clean up raw and images directories
-        find /home/server/rtl/pyrtl/raw/ -type f -mtime +1 -exec rm -r {} \;
-        find /home/server/rtl/pyrtl/images/ -type f -mtime +1 -exec rm -r {} \;
-        find /home/server/rtl/pyrtl/sound/ -type f -mtime +1 -exec rm -r {} \;
 
     fi
 done

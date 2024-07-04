@@ -37,8 +37,8 @@ def extract_observation_start_time(fits_filename):
 
 def bandpass_filter(signal_data, sampling_rate, center_frequency, bandwidth, filter_order):
     nyquist_rate = sampling_rate / 2
-    low_cutoff = ((center_frequency - 10e6) - bandwidth / 2) / nyquist_rate
-    high_cutoff = ((center_frequency - 10e6) + bandwidth / 2) / nyquist_rate
+    low_cutoff = (center_frequency - bandwidth / 2) / nyquist_rate
+    high_cutoff = (center_frequency + bandwidth / 2) / nyquist_rate
     sos = signal.butter(filter_order, [low_cutoff, high_cutoff], btype='bandpass', output='sos', fs=sampling_rate)
     return signal.sosfiltfilt(sos, signal_data)
 
@@ -82,6 +82,9 @@ def remove_lnb_offset(signal_data, sampling_frequency, lnb_offset_frequency):
     b, a = signal.butter(5, lnb_normalized_frequency, btype='high')
     return signal.filtfilt(b, a, signal_data)
 
+def remove_dc_offset(signal_data):
+    return signal_data - np.mean(signal_data)
+
 def main(args):
     filename = os.path.basename(args.input)
     date, time = extract_date_from_filename(filename)
@@ -91,6 +94,11 @@ def main(args):
         hdul = fits.open(args.input, ignore_missing_simple=True)
         data = hdul[0].data
         hdul.close()
+        
+        # Remove DC offset from the data
+        data = remove_dc_offset(data)
+        
+        # Remove LNB offset and apply bandpass filter
         data = remove_lnb_offset(data, args.sampling_rate, args.lnb_offset)
         data = bandpass_filter(data, args.sampling_rate, args.center_frequency, args.bandwidth, 5)
         

@@ -9,10 +9,12 @@ sfreq=408e6
 duration=1200
 srf=2.4e6
 tol=1.6e6
-chunk=1024
-ip=10.10.1.143
+chunk=2048
+ip=10.10.1.17
 port=8885
 workers=24
+fileappend=408MHz
+
 
 # Configuration variables for rsync
 nas_base_dir="/mnt/nas/tests"
@@ -33,7 +35,7 @@ for file in *.fits; do
         filename_w="${file%.fits}"
 
         # Append _408MHz to the filename
-        filename_w_408="${filename_w}_408MHz"
+        filename_w_408="${filename_w}_${fileappend}"
 
         # Rename the file with _408MHz appended
         mv "$file" "raw/${filename_w_408}.fits"
@@ -58,7 +60,7 @@ for file in *.fits; do
         python3 tosound.py "raw/$pf" "sound/${filename_w_408}.wav" --samplerate 48000
 
         echo "Starting Processing"
-        # python3 process5.py -f "raw/$pf" -i "raw/${filename_w_408}.fits" -o "images/${filename_w_408}/" --start_time 0 --end_time $duration --tolerance $tol --chunk_size $chunk --fs $srf
+        python3 process5.py -f "raw/$pf" -i "raw/${filename_w_408}.fits" -o "images/${filename_w_408}/" --start_time 0 --end_time $duration --tolerance $tol --chunk_size $chunk --fs $srf --center-frequency $sfreq
 
         # Generate Heatmap
         echo "Starting Heatmap"
@@ -70,18 +72,18 @@ for file in *.fits; do
         # Navigate back to the script's directory
         cd /home/server/rtl/pyrtl
 
-        # Sync processed images to NAS
-        rsync -avh --update images/ "$nas_images_dir/"
+        # # Sync processed images to NAS
+        # rsync -avh --update images/ "$nas_images_dir/"
 
-        # Sync raw data to NAS
-        rsync -avh --update raw/ "$nas_raw_dir/"
+        # # Sync raw data to NAS
+        # rsync -avh --update raw/ "$nas_raw_dir/"
 
-        # Sync sound data to NAS
-        rsync -avh --update sound/ "$nas_sound_dir/"
+        # # Sync sound data to NAS
+        # rsync -avh --update sound/ "$nas_sound_dir/"
 
-        # Clean up raw and images directories
-        find /home/server/rtl/pyrtl/raw/ -type f -mtime +1 -exec rm -r {} \;
-        find /home/server/rtl/pyrtl/images/ -type f -mtime +1 -exec rm -r {} \;
-        find /home/server/rtl/pyrtl/sound/ -type f -mtime +1 -exec rm -r {} \;
+        # # Clean up raw and images directories
+        # find /home/server/rtl/pyrtl/raw/ -type f -mmin +360 -exec rm -r {} \;
+        # find /home/server/rtl/pyrtl/images/ -type f -mmin +360 -exec rm -r {} \;
+        # find /home/server/rtl/pyrtl/sound/ -type f -mmin +360 -exec rm -r {} \;
     fi
 done

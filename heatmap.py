@@ -29,7 +29,13 @@ def process_chunk(args):
     filename, chunk_size, chunk_idx, fs, cutoff_freq, nperseg = args
     data_chunk = read_fits_chunk(filename, chunk_size, chunk_idx)
     # denoised_chunk = denoise_signal(data_chunk, cutoff_freq, fs)
-    f, t, Sxx = spectrogram(data_chunk, fs=fs, nperseg=nperseg, noverlap=nperseg//2, scaling='density', mode='magnitude')
+    try:
+        f, t, Sxx = spectrogram(data_chunk, fs=fs, nperseg=nperseg, noverlap=nperseg//2, scaling='density', mode='magnitude')
+    except ValueError as e:
+        print(f"ValueError: {e}. Adjusting nperseg and noverlap.")
+        nperseg = min(nperseg, len(data_chunk))
+        noverlap = min(nperseg//2, len(data_chunk) - 1)
+        f, t, Sxx = spectrogram(data_chunk, fs=fs, nperseg=nperseg, noverlap=noverlap, scaling='density', mode='magnitude')
     return f, t + chunk_idx * (len(data_chunk) / fs), Sxx
 
 def extract_datetime_from_filename(filename):
@@ -66,6 +72,11 @@ def main():
     with fits.open(args.input, memmap=True) as hdulist:
         data_size = len(hdulist[0].data)
     num_chunks = data_size // args.chunk_size + (data_size % args.chunk_size > 0)
+
+    # Adjust nperseg if it is larger than chunk size
+    if args.nperseg > args.chunk_size:
+        print(f"nperseg ({args.nperseg}) is greater than chunk size ({args.chunk_size}), adjusting nperseg to {args.chunk_size}")
+        args.nperseg = args.chunk_size
 
     # Create arguments for multiprocessing
     tasks = [(args.input, args.chunk_size, chunk_idx, args.fs, args.cutoff_freq, args.nperseg) for chunk_idx in range(num_chunks)]

@@ -29,7 +29,6 @@ EARTH_ROTATION_RATE = 15  # degrees per hour
 tolerance = 1e6
 
 # Sampling frequency in Hz
-fs = 2.4e6
 # Low band LO frequency in MHz
 notch_freq = 9750
 # Notch width in MHz
@@ -183,12 +182,6 @@ def find_emission_absorption_lines(freq, fft_values, height_threshold=0.1, dista
     troughs, _ = find_peaks(-magnitude, height=height_threshold, distance=distance)
     return peaks, troughs
 
-def downsample_data(data, max_columns=2**23):
-    if data.shape[1] > max_columns:
-        factor = data.shape[1] // max_columns
-        return data[:, ::factor]
-    return data
-
 def save_spectra(freq, fft_values, peaks, troughs, output_dir, date, time):
   with tqdm(total=1, desc='Generating Spectra:') as pbar:
   
@@ -240,7 +233,7 @@ def save_spectra2(freq, fft_values, peaks, troughs, output_dir, date, time):
 def save_plots_to_png(spectrogram, signal_strength, frequencies, times, png_location, date, time):
     with tqdm(total=1, desc='Generating Spectrogram & Signal_Strength:') as pbar:
         try:
-            spectrogram = downsample_data(spectrogram)
+            
             plt.figure()
             plt.imshow(10 * np.log10(spectrogram.T), aspect='auto', cmap='viridis', origin='lower',
                        extent=[times[0], times[-1], frequencies[0], frequencies[-1]])
@@ -260,7 +253,6 @@ def save_plots_to_png(spectrogram, signal_strength, frequencies, times, png_loca
                 plt.savefig(f'{png_location}/signal_strength_{date}_{time}.png')
                 plt.close()
             elif signal_strength.ndim == 2:
-                signal_strength = downsample_data(signal_strength)
                 plt.figure()
                 plt.imshow(signal_strength.T, aspect='auto', cmap='viridis', origin='lower')
                 plt.title('Signal Strength')
@@ -274,7 +266,7 @@ def save_plots_to_png(spectrogram, signal_strength, frequencies, times, png_loca
             print(f"An error occurred while saving plots: {str(e)}")
 
 
-def preprocess_signal(signal_data, start_time, end_time):
+def preprocess_signal(signal_data, start_time, end_time, fs):
     time_vector = np.linspace(0, len(signal_data) / fs, num=len(signal_data))
     mask = (time_vector >= start_time) & (time_vector <= end_time)
     processed_signal = signal_data[mask]
@@ -376,24 +368,24 @@ def denoise_signal(data, wavelet='db1', level=1):
 def amplify_signal(data, factor=10):
     return data * factor
 
-def bandpass_filter(signal_data, sampling_rate, center_frequency, bandwidth=400e3, filter_order=5, tolerance=1e6):
-    nyquist_rate = sampling_rate / 2.0
-    if abs(center_frequency - args.center_frequency) < tolerance:
-        low_cutoff = ((center_frequency - 10e6) - bandwidth / 2) / nyquist_rate
-        high_cutoff = ((center_frequency - 10e6) + bandwidth / 2) / nyquist_rate
-    else:
-        low_cutoff = (center_frequency - bandwidth / 2) / nyquist_rate
-        high_cutoff = (center_frequency + bandwidth / 2) / nyquist_rate
-    # Convert cutoff frequencies to the range [0, 1]
-    high_cutoff = high_cutoff / nyquist_rate
-    low_cutoff = low_cutoff / nyquist_rate
-    # Print normalized cutoff frequencies
-    print("Low Cutoff (Normalized):", low_cutoff)
-    print("High Cutoff (Normalized):", high_cutoff)
-    print("Center Frequency:", center_frequency)
-    sos = butter(filter_order, [low_cutoff, high_cutoff], btype='band', output='sos')
-    filtered_signal = sosfiltfilt(sos, signal_data)
-    return filtered_signal
+# def bandpass_filter(signal_data, sampling_rate, center_frequency, bandwidth=400e3, filter_order=5, tolerance=1e6):
+#     nyquist_rate = sampling_rate / 2.0
+#     if abs(center_frequency - args.center_frequency) < tolerance:
+#         low_cutoff = ((center_frequency - 10e6) - bandwidth / 2) / nyquist_rate
+#         high_cutoff = ((center_frequency - 10e6) + bandwidth / 2) / nyquist_rate
+#     else:
+#         low_cutoff = (center_frequency - bandwidth / 2) / nyquist_rate
+#         high_cutoff = (center_frequency + bandwidth / 2) / nyquist_rate
+#     # Convert cutoff frequencies to the range [0, 1]
+#     high_cutoff = high_cutoff / nyquist_rate
+#     low_cutoff = low_cutoff / nyquist_rate
+#     # Print normalized cutoff frequencies
+#     print("Low Cutoff (Normalized):", low_cutoff)
+#     print("High Cutoff (Normalized):", high_cutoff)
+#     print("Center Frequency:", center_frequency)
+#     sos = butter(filter_order, [low_cutoff, high_cutoff], btype='band', output='sos')
+#     filtered_signal = sosfiltfilt(sos, signal_data)
+#     return filtered_signal
 
 # def compute_fft(signal_data, sampling_rate):
 #     # Remove DC component
@@ -421,7 +413,7 @@ def process_fft_file(input_fits, output_dir, fs, date, time, chunk_size=1024):
             np.save(f, np.array([]))  # Save an empty array to initialize the file
 
         def process_and_save_chunk(chunk, output_file):
-            logging.debug(f"Processing chunk with length: {len(chunk)}")
+            
             if len(chunk) == 0:
                 logging.warning("Received an empty chunk for processing.")
                 return chunk
@@ -443,7 +435,7 @@ def process_fft_file(input_fits, output_dir, fs, date, time, chunk_size=1024):
 
             with fits.open(input_fits) as hdul:
                 data = hdul[0].data
-                logging.info(f"Data shape: {data.shape}")
+                
 
                 if not isinstance(data.shape, tuple):
                     logging.error(f"Unexpected type for data.shape: {type(data.shape)}")
@@ -501,15 +493,21 @@ def process_fft_file(input_fits, output_dir, fs, date, time, chunk_size=1024):
 
         if amplified_signal.size > 0:
             logging.debug(f"Amplified signal size: {amplified_signal.size}")
+
+                    # Remove LNB offset and apply bandpass filter
+            amplified_signal = remove_dc_offset(amplified_signal)
             freq, fft_values = compute_fft(amplified_signal, fs)
             peaks, troughs = find_emission_absorption_lines(freq, fft_values)
             create_spectral_line_image(freq, fft_values, peaks, troughs, output_dir, date, time)
             create_spectral_line_image2(freq, fft_values, peaks, troughs, output_dir, date, time)
             save_spectra2(freq, fft_values, peaks, troughs, output_dir, date, time)
-            save_spectrogram_and_signal_strength(amplified_signal, fs, output_dir, date, time)
+            
 
+            # Save spectra and create spectral line image
+            save_spectra(freq, amplified_signal, peaks, troughs, output_dir, date, time)
             # Add LOFAR imaging step
             generate_lofar_image(amplified_signal, output_dir, date, time)
+            
             
         else:
             logging.warning("No valid data processed.")
@@ -616,7 +614,8 @@ def create_spectral_line_image2(freq, fft_values, peaks, troughs, output_dir, da
     plt.savefig(output_path)
     plt.close()
 
-
+def remove_dc_offset(signal_data):
+    return signal_data - np.mean(signal_data)
 
 def main(args):
     try:
@@ -634,7 +633,7 @@ def main(args):
         start_time = extract_observation_start_time(input_fits)
         rotation_angle = calculate_rotation_angle(start_time)
         
-        signal_data = apply_rotation(signal_data, rotation_angle)
+        # signal_data = apply_rotation(signal_data, rotation_angle)
         
         delta_lambda = 1e-2
         lambda_0 = 0.211
@@ -670,26 +669,16 @@ def main(args):
         processed_fft_values = preprocess_fft_values(fft_both)
 
         # Process signal data
-        filtered_signal = preprocess_signal(signal_data, start_time=0, end_time=len(signal_data) / sample_rate)
-
-
-        # # # Save spectrogram and signal strength
-        # save_spectrogram_and_signal_strength(filtered_signal, sample_rate, output_dir, date, time)
-
+        
+        save_spectrogram_and_signal_strength(signal_data, args.fs, output_dir, date, time)
 
         # Find peaks and troughs
         peaks, troughs = find_emission_absorption_lines(freq, processed_fft_values)
 
-
         # Save spectra and create spectral line image
         save_spectra(freq, processed_fft_values, peaks, troughs, output_dir, date, time)
 
-
-        # # Compute MFCC and save plot
-        mfcc = compute_mfcc(filtered_signal, sample_rate)
-        save_mfcc_plot(mfcc, output_dir, date, time)
-
-        process_fft_file(args.input_fits, args.output_dir, sample_rate, date, time)
+        process_fft_file(args.input_fits, args.output_dir, args.fs, date, time)
 
         print("Signal processing and image generation completed successfully.")
 
@@ -703,7 +692,7 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output_dir', type=str, required=True, help='Path to the output directory.')
     parser.add_argument('-s', '--start_time', type=float, default=0, help='Start time for signal preprocessing.')
     parser.add_argument('-e', '--end_time', type=float, default=None, help='End time for signal preprocessing.')
-    parser.add_argument('--fs', type=float, default=2.4e6, help='Sampling frequency in Hz.')
+    parser.add_argument('--fs', type=float, default=20e6, help='Sampling frequency in Hz.')
     parser.add_argument('--chunk_size', type=int, default=1024, help='Chunk size for processing data.')
     parser.add_argument('--tolerance', type=float, default=1e6, help='Tolerance for bandpass filter frequency check.')
     parser.add_argument('--center-frequency', type=float, default=1420.4e6, help='Center Frequency.')

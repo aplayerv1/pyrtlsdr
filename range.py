@@ -46,7 +46,6 @@ def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate,
         # Append the received data to the byte string
         data += received_data
 
-
     data_array = np.frombuffer(data, dtype=np.uint8)
 
     # Determine dimensions of the data array

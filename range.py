@@ -1,103 +1,103 @@
-import argparse
 import os
 import numpy as np
 import time
 import socket
 from astropy.io import fits
 import json
+import argparse
 
 def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate, duration_seconds, output_dir):
-    # Connect to the remote server
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client_socket.connect(server_address)
     print(f"Connected to server at {server_address}")
 
-    # Send parameters to the server
     params = {
         'start_freq': start_freq,
-        'end_freq': end_freq,
+        'end_freq': end_freq if not single_freq else start_freq,
         'single_freq': single_freq,
         'sample_rate': sample_rate,
-        'duration_seconds': duration_seconds  # Include duration_seconds in the parameters
+        'duration_seconds': duration_seconds
     }
-    # Convert the dictionary to a JSON string
-    params_str = json.dumps(params)
+    client_socket.sendall(json.dumps(params).encode())
 
-    # Encode the JSON string and send it over the socket
-    client_socket.sendall(params_str.encode())
+    data = bytearray()
+    start_time = time.time()
+    last_data_time = start_time
+    client_socket.settimeout(5.0)  # Set a timeout for recv
 
-    # client_socket.sendall(str(params).encode())
-    
-    # Receive data from the server and save it to a FITS file
-    data = b''  # Initialize an empty byte string to store the received data
-    timestamp = time.strftime('%Y%m%d_%H%M%S')
-    fits_filename = os.path.join(output_dir, f'data_{timestamp}.fits')
-    header = fits.Header()
-    header['DATE'] = time.strftime("%Y-%m-%d", time.gmtime())
-    header['TIME'] = time.strftime("%H:%M:%S", time.gmtime())
-    start_time = time.time()  # Record the start time
-
-    # Loop to receive data and append it to the byte string
     while True:
-        received_data = client_socket.recv(4096)
-        if not received_data:
-            break  # Exit the loop if no more data is received
+        try:
+            chunk = client_socket.recv(4096)
+            if chunk:
+                data.extend(chunk)
+                last_data_time = time.time()
+            else:
+                if time.time() - last_data_time > 5:  # 5 seconds timeout after last received data
+                    print("No data received for 5 seconds. Assuming transmission complete.")
+                    break
+                print("No data received. Waiting...")
+                time.sleep(1)
+        except socket.timeout:
+            if time.time() - last_data_time > 5:  # 5 seconds timeout after last received data
+                print("Socket timeout and no data received for 5 seconds. Assuming transmission complete.")
+                break
+            print("Socket timeout. Continuing...")
+        except Exception as e:
+            print(f"Error receiving data: {e}")
+            break
 
-        # Append the received data to the byte string
-        data += received_data
+        current_time = time.time()
+        elapsed_time = current_time - start_time
+        print(f"Elapsed time: {elapsed_time:.2f} seconds")
 
-    data_array = np.frombuffer(data, dtype=np.uint8)
-
-    # Determine dimensions of the data array
-    data_shape = data_array.shape
-
-    # Now create the FITS file and save the data
-    # Now create the FITS file and save the data
-    with fits.open(fits_filename, mode='append') as hdul:
-        hdu = fits.PrimaryHDU(data_array, header=header)
-        hdu.header['NAXIS'] = len(data_shape)
-        for i, dim in enumerate(data_shape):
-            hdu.header[f'NAXIS{i+1}'] = dim
-
-    # Convert the byte string to a NumPy array
-    data_array = np.frombuffer(data, dtype=np.uint8)
-
-    # Now create the FITS file and save the data
-    with fits.open(fits_filename, mode='append') as hdul:
-        hdu = fits.PrimaryHDU(data_array, header=header)
-        hdul.append(hdu)
-
-    print(f"Data saved to: {fits_filename}")
-
-    # Close the connection
     client_socket.close()
 
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    fits_filename = os.path.join(output_dir, f'data_{timestamp}.fits')
+    data_array = np.frombuffer(data, dtype=np.complex64)  # Reading the buffer as complex64
+
+    data_array = np.frombuffer(data, dtype=np.complex64)
+
+    if np.any(data_array != 0):
+        real_part = data_array.real
+        imag_part = data_array.imag
+
+        # Create a Primary HDU for the real part
+        hdu_real = fits.PrimaryHDU(data=real_part)
+        hdu_real.header['DATE'] = time.strftime("%Y-%m-%d", time.gmtime())
+        hdu_real.header['TIME'] = time.strftime("%H:%M:%S", time.gmtime())
+        hdu_real.header['PART'] = 'REAL'
+
+        # Create an ImageHDU for the imaginary part
+        hdu_imag = fits.ImageHDU(data=imag_part)
+        hdu_imag.header['PART'] = 'IMAG'
+
+        # Create an HDUList and write to file
+        hdul = fits.HDUList([hdu_real, hdu_imag])
+        hdul.writeto(fits_filename, overwrite=True)
+
+        print(f"Data saved to: {fits_filename}")
+    else:
+        print("Received only zero values. FITS file not created.")
+
+    print(f"Received {len(data)} bytes over {elapsed_time:.2f} seconds")
 
 if __name__ == "__main__":
-    # Parse command-line arguments
     parser = argparse.ArgumentParser(description='RTL-SDR Data Capture Client')
     parser.add_argument('server_ip', type=str, help='IP address of the server')
     parser.add_argument('server_port', type=int, help='Port number of the server')
     parser.add_argument('--start-freq', type=float, help='Start frequency in Hz', required=True)
     parser.add_argument('--end-freq', type=float, help='End frequency in Hz')
     parser.add_argument('--single-freq', action='store_true', help='Capture data for a single frequency')
-
     parser.add_argument('--sample-rate', type=float, help='Sample rate in Hz', default=2.4e6)
-
     parser.add_argument('--duration', type=int, help='Duration of capture in seconds', default=60)
     parser.add_argument('--output-dir', type=str, help='Directory to save the output file', default='./')
     args = parser.parse_args()
 
-    # If single frequency is specified, ignore end frequency
     if args.single_freq:
-        args.end_freq = None
+        args.end_freq = args.start_freq
 
-    # Create the output directory if it does not exist
     os.makedirs(args.output_dir, exist_ok=True)
-
-    # Define the server address as a tuple
     server_address = (args.server_ip, args.server_port)
-
-    # Capture data from the server
     capture_data(server_address, args.start_freq, args.end_freq, args.single_freq,
                  args.sample_rate, args.duration, args.output_dir)

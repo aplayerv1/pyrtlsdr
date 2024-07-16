@@ -27,16 +27,36 @@ def denoise_signal(signal, cutoff_freq, fs):
 
 def process_chunk(args):
     filename, chunk_size, chunk_idx, fs, cutoff_freq, nperseg = args
+
+    # Get the total number of chunks
+    with fits.open(filename, memmap=True) as hdulist:
+        data_size = len(hdulist[0].data)
+    num_chunks = data_size // chunk_size + (data_size % chunk_size > 0)
+
     data_chunk = read_fits_chunk(filename, chunk_size, chunk_idx)
-    # denoised_chunk = denoise_signal(data_chunk, cutoff_freq, fs)
+
+    # Calculate the start and end times for the current chunk
+    start_time = chunk_idx * chunk_size / fs
+    end_time = (chunk_idx + 1) * chunk_size / fs
+
+    # Calculate the overlap with the next chunk
+    if chunk_idx < num_chunks - 1:
+        next_start_time = (chunk_idx + 1) * chunk_size / fs
+        overlap = int((end_time - next_start_time) * fs)
+    else:
+        overlap = 0
+
     try:
-        f, t, Sxx = spectrogram(data_chunk, fs=fs, nperseg=nperseg, noverlap=nperseg//2, scaling='density', mode='magnitude')
+        f, t, Sxx = spectrogram(data_chunk, fs=fs, nperseg=nperseg, noverlap=overlap, nfft=nperseg, mode='magnitude')
+        print(f"Chunk {chunk_idx}: t.min() = {t.min() + start_time}, t.max() = {t.max() + start_time}")
     except ValueError as e:
         print(f"ValueError: {e}. Adjusting nperseg and noverlap.")
         nperseg = min(nperseg, len(data_chunk))
-        noverlap = min(nperseg//2, len(data_chunk) - 1)
-        f, t, Sxx = spectrogram(data_chunk, fs=fs, nperseg=nperseg, noverlap=noverlap, scaling='density', mode='magnitude')
-    return f, t + chunk_idx * (len(data_chunk) / fs), Sxx
+        noverlap = min(nperseg // 2, len(data_chunk) - 1)
+        f, t, Sxx = spectrogram(data_chunk, fs=fs, nperseg=nperseg, noverlap=noverlap, nfft=nperseg, mode='magnitude')
+        print(f"Chunk {chunk_idx}: t.min() = {t.min() + start_time}, t.max() = {t.max() + start_time}")
+
+    return f, t + start_time, Sxx
 
 def extract_datetime_from_filename(filename):
     """Extract datetime from the filename in the format data_YYMMDD_HHMMSS."""

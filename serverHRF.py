@@ -5,93 +5,112 @@ import json
 import logging
 import numpy as np
 from pyhackrf2 import HackRF
+from logging.handlers import RotatingFileHandler
 
-logging.basicConfig(level=logging.INFO)
+# Set up logging to both console and file
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# File handler with 10MB limit and 5 backup files
+file_handler = RotatingFileHandler("serverHRF.log", maxBytes=10*1024*1024, backupCount=5)
+file_handler.setFormatter(log_formatter)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
+# Root logger configuration
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
 
 def configure_sdr(sdr, sample_rate, gain):
     try:
-        sdr.sample_rate = int(sample_rate)
-        sdr.lna_gain = int(gain)
-        sdr.vga_gain = int(gain)
+        sdr.sample_rate = sample_rate
+        sdr.lna_gain = gain
+        sdr.vga_gain = gain
+        sdr.amp_enable = gain > 0
         sdr.amplifier_on = True
+        logging.info(f"Configured SDR with sample_rate={sample_rate}, gain={gain}")
     except Exception as e:
         logging.error(f"Error configuring HackRF: {e}")
 
 def handle_client(client_socket, sdr, tuning_parameters):
-    start_freq = float(tuning_parameters['start_freq'])
-    end_freq = float(tuning_parameters.get('end_freq', start_freq))
+    start_freq = int(tuning_parameters['start_freq'])
+    end_freq = int(tuning_parameters.get('end_freq', start_freq))
     single_freq = tuning_parameters.get('single_freq', False)
-    sample_rate = float(tuning_parameters['sample_rate'])
-    gain = float(tuning_parameters.get('gain', 20))  # Default gain to 20 if not specified
-    duration_seconds = tuning_parameters.get('duration_seconds', 10)  # Default to 10 seconds if not specified
-    buffer_size = tuning_parameters.get('buffer_size', 1024)  # Default buffer size
+    sample_rate = int(tuning_parameters['sample_rate'])
+    gain = int(tuning_parameters.get('gain', 20))
+    duration_seconds = int(tuning_parameters.get('duration_seconds', 10))
+    buffer_size = int(tuning_parameters.get('buffer_size', 1024))
 
     logging.info(f"Start frequency: {start_freq} Hz, End frequency: {end_freq} Hz, Single frequency mode: {single_freq}, Sample rate: {sample_rate}, Gain: {gain}, Duration: {duration_seconds} seconds, Buffer size: {buffer_size}")
 
     configure_sdr(sdr, sample_rate, gain)
-    
+
     start_time = time.time()
 
-    if single_freq:
-        sdr.center_freq = int(start_freq)
-        logging.info(f"Receiving at frequency {start_freq} Hz")
-        buffer = []
-        while (time.time() - start_time) < duration_seconds:
-            samples = sdr.read_samples()
-            buffer.extend(samples)
-            logging.info(f"Read {len(samples)} samples")
-            
-            if len(buffer) >= buffer_size:
-                try:
-                    client_socket.sendall(samples.astype(np.complex64).tobytes())
-                    logging.info(f"Sent {len(samples)} samples to client")
-                    buffer = []  # Clear buffer after sending
-                except Exception as e:
-                    logging.error(f"Error sending data to client: {e}")
-                    break
-        # Send remaining samples in buffer
-        if buffer:
-            try:
-                client_socket.sendall(np.array(buffer).astype(np.complex64).tobytes())
-                logging.info(f"Sent remaining {len(buffer)} samples to client")
-            except Exception as e:
-                logging.error(f"Error sending data to client: {e}")
-        logging.info(f"Stopped receiving at frequency {start_freq} Hz")
-    else:
-        freq_range = range(int(start_freq), int(end_freq) + 1_000_000, 1_000_000)
-        logging.info(f"Frequency range: {list(freq_range)}")
-        
-        for freq in freq_range:
-            sdr.center_freq = int(freq)
-            logging.info(f"Receiving at frequency {freq} Hz")
-            buffer = []
-            freq_start_time = time.time()
-            while (time.time() - freq_start_time) < duration_seconds:
-                samples = sdr.read_samples()
-                buffer.extend(samples)
-                logging.info(f"Read {len(samples)} samples at frequency {freq} Hz")
-                
-                if len(buffer) >= buffer_size:
-                    try:
-                        client_socket.sendall(np.array(buffer).astype(np.complex64).tobytes())
-                        logging.info(f"Sent {len(buffer)} samples to client at frequency {freq} Hz")
-                        buffer = []  # Clear buffer after sending
-                    except Exception as e:
-                        logging.error(f"Error sending data to client: {e}")
-                        break
-                
-                if (time.time() - start_time) > duration_seconds:
-                    break
-            
-            # Send remaining samples in buffer
-            if buffer:
-                try:
-                    client_socket.sendall(np.array(buffer).astype(np.complex64).tobytes())
-                    logging.info(f"Sent remaining {len(buffer)} samples to client at frequency {freq} Hz")
-                except Exception as e:
-                    logging.error(f"Error sending data to client: {e}")
-            
-            logging.info(f"Stopped receiving at frequency {freq} Hz")
+    try:
+        if single_freq:
+            sdr.center_freq = start_freq
+            logging.info(f"Receiving at frequency {start_freq} Hz")
+            _stream_samples(sdr, client_socket, buffer_size, duration_seconds, start_time)
+        else:
+            # Sweeping from start_freq to end_freq over duration_seconds
+            step_size = (end_freq - start_freq) / (duration_seconds * 1e6)  # Increment per second in MHz
+            current_freq = start_freq
+
+            while current_freq <= end_freq and (time.time() - start_time) <= duration_seconds:
+                sdr.center_freq = current_freq
+                logging.info(f"Current frequency: {current_freq} Hz, Elapsed time: {time.time() - start_time:.2f} seconds")
+                _stream_samples(sdr, client_socket, buffer_size, 1, time.time())  # Stream for 1 second at each frequency
+                current_freq += step_size * 1e6  # Increment frequency by step_size in MHz
+
+    except Exception as e:
+        logging.error(f"Error during sweeping: {e}")
+
+def _stream_samples(sdr, client_socket, buffer_size, duration_seconds, start_time):
+    end_time = start_time + duration_seconds
+    initialization_timeout = 10  # 10 seconds timeout for initialization
+    initialization_start = time.time()
+
+    while time.time() < end_time:
+        try:
+            samples = sdr.read_samples(buffer_size)
+            if samples.size == 0:
+                logging.warning("No samples read from SDR.")
+                time.sleep(0.1)
+                continue
+
+            # Check if device has initialized (values are not 0.5)
+            if np.any(np.abs(samples - 0.5) > 1e-6):
+                break
+
+            if time.time() - initialization_start > initialization_timeout:
+                logging.warning("Initialization timeout reached. Starting data transmission.")
+                break
+
+        except Exception as e:
+            logging.error(f"Error during sample reading: {e}")
+            break
+
+    actual_start_time = time.time()
+    while time.time() < end_time:
+        try:
+            samples = sdr.read_samples(buffer_size)
+            if samples.size == 0:
+                logging.warning("No samples read from SDR.")
+                time.sleep(0.1)
+                continue
+
+            client_socket.sendall(samples.astype(np.complex64).tobytes())
+            logging.debug(f"Sent {len(samples)} samples to client")
+
+        except Exception as e:
+            logging.error(f"Error during sample streaming: {e}")
+            break
+
+    logging.info("Finished streaming samples.")
 
 def main(args):
     server_address = args.server_address
@@ -126,6 +145,8 @@ def main(args):
                 logging.info("Client disconnected abruptly.")
                 client_socket.close()
                 continue
+            except Exception as e:
+                logging.error(f"Error handling client: {e}")
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt detected. Closing server.")
     except Exception as e:

@@ -7,7 +7,7 @@ import numpy as np
 from pyhackrf2 import HackRF
 from logging.handlers import RotatingFileHandler
 
-# Set up logging to both console and file
+# Set up logging
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # File handler with 10MB limit and 5 backup files
@@ -24,55 +24,47 @@ root_logger.setLevel(logging.DEBUG)
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
-def configure_sdr(sdr, sample_rate, gain):
+def configure_sdr(sdr, sample_rate, gain, center_freq, bandwidth):
     try:
         sdr.sample_rate = sample_rate
+        sdr.center_freq = center_freq
+        sdr.bandwidth = bandwidth
         sdr.lna_gain = gain
         sdr.vga_gain = gain
         sdr.amp_enable = gain > 0
         sdr.amplifier_on = True
-        logging.info(f"Configured SDR with sample_rate={sample_rate}, gain={gain}")
+        logging.info(f"Configured SDR with sample_rate={sample_rate}, gain={gain}, center_freq={center_freq}, bandwidth={bandwidth}")
     except Exception as e:
         logging.error(f"Error configuring HackRF: {e}")
 
 def handle_client(client_socket, sdr, tuning_parameters):
     start_freq = int(tuning_parameters['start_freq'])
     end_freq = int(tuning_parameters.get('end_freq', start_freq))
-    single_freq = tuning_parameters.get('single_freq', False)
     sample_rate = int(tuning_parameters['sample_rate'])
     gain = int(tuning_parameters.get('gain', 20))
     duration_seconds = int(tuning_parameters.get('duration_seconds', 10))
     buffer_size = int(tuning_parameters.get('buffer_size', 1024))
 
-    logging.info(f"Start frequency: {start_freq} Hz, End frequency: {end_freq} Hz, Single frequency mode: {single_freq}, Sample rate: {sample_rate}, Gain: {gain}, Duration: {duration_seconds} seconds, Buffer size: {buffer_size}")
+    center_freq = (start_freq + end_freq) // 2
+    bandwidth = end_freq - start_freq
 
-    configure_sdr(sdr, sample_rate, gain)
+    logging.info(f"Handling client with parameters: start_freq={start_freq}, end_freq={end_freq}, center_freq={center_freq}, bandwidth={bandwidth}, sample_rate={sample_rate}, gain={gain}, duration={duration_seconds}s, buffer_size={buffer_size}")
+
+    configure_sdr(sdr, sample_rate, gain, center_freq, bandwidth)
 
     start_time = time.time()
 
     try:
-        if single_freq:
-            sdr.center_freq = start_freq
-            logging.info(f"Receiving at frequency {start_freq} Hz")
-            _stream_samples(sdr, client_socket, buffer_size, duration_seconds, start_time)
-        else:
-            # Sweeping from start_freq to end_freq over duration_seconds
-            step_size = (end_freq - start_freq) / (duration_seconds * 1e6)  # Increment per second in MHz
-            current_freq = start_freq
-
-            while current_freq <= end_freq and (time.time() - start_time) <= duration_seconds:
-                sdr.center_freq = current_freq
-                logging.info(f"Current frequency: {current_freq} Hz, Elapsed time: {time.time() - start_time:.2f} seconds")
-                _stream_samples(sdr, client_socket, buffer_size, 1, time.time())  # Stream for 1 second at each frequency
-                current_freq += step_size * 1e6  # Increment frequency by step_size in MHz
-
+        _stream_samples(sdr, client_socket, buffer_size, duration_seconds, start_time)
     except Exception as e:
-        logging.error(f"Error during sweeping: {e}")
+        logging.error(f"Error during streaming: {e}")
 
 def _stream_samples(sdr, client_socket, buffer_size, duration_seconds, start_time):
     end_time = start_time + duration_seconds
-    initialization_timeout = 10  # 10 seconds timeout for initialization
+    initialization_timeout = 10
     initialization_start = time.time()
+
+    logging.info(f"Starting sample streaming for {duration_seconds} seconds")
 
     while time.time() < end_time:
         try:
@@ -82,8 +74,8 @@ def _stream_samples(sdr, client_socket, buffer_size, duration_seconds, start_tim
                 time.sleep(0.1)
                 continue
 
-            # Check if device has initialized (values are not 0.5)
             if np.any(np.abs(samples - 0.5) > 1e-6):
+                logging.info("SDR initialization complete")
                 break
 
             if time.time() - initialization_start > initialization_timeout:
@@ -95,6 +87,7 @@ def _stream_samples(sdr, client_socket, buffer_size, duration_seconds, start_tim
             break
 
     actual_start_time = time.time()
+    samples_sent = 0
     while time.time() < end_time:
         try:
             samples = sdr.read_samples(buffer_size)
@@ -104,20 +97,31 @@ def _stream_samples(sdr, client_socket, buffer_size, duration_seconds, start_tim
                 continue
 
             client_socket.sendall(samples.astype(np.complex64).tobytes())
-            logging.debug(f"Sent {len(samples)} samples to client")
+            samples_sent += len(samples)
+            logging.debug(f"Sent {len(samples)} samples to client. Total sent: {samples_sent}")
 
+        except socket.error as e:
+            if isinstance(e, BrokenPipeError) or e.errno == errno.EPIPE:
+                logging.info("Client disconnected. Stopping transmission.")
+                break
+            else:
+                logging.error(f"Socket error during sample streaming: {e}")
+                break
         except Exception as e:
             logging.error(f"Error during sample streaming: {e}")
             break
 
-    logging.info("Finished streaming samples.")
+    logging.info(f"Finished streaming samples. Total samples sent: {samples_sent}")
 
 def main(args):
     server_address = args.server_address
     server_port = args.server_port
 
+    logging.info(f"Starting HackRF server on {server_address}:{server_port}")
+
     try:
         sdr = HackRF()
+        logging.info("HackRF device initialized successfully")
     except Exception as e:
         logging.error(f"Failed to initialize HackRF device: {e}")
         return

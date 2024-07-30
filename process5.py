@@ -12,7 +12,7 @@ from astropy.io import fits
 from astropy.time import Time
 import astropy.units as u
 from astropy.coordinates import EarthLocation, AltAz, SkyCoord
-
+import cProfile
 import librosa
 import librosa.display
 import pywt
@@ -28,17 +28,17 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 import logging
 
-from image_gen.spectra import save_spectra, save_spectra2
+from image_gen.spectra import save_spectra,save_enhanced_spectra, clip_indices
 from image_gen.waterfall import save_waterfall_image
 from image_gen.psd import calculate_and_save_psd
 from image_gen.lofar import generate_lofar_image
-from image_gen.save_plots import save_plots_to_png, analyze_signal_strength
-from image_gen.spectral_line import create_spectral_line_image, brightness_temp_plot, calculate_brightness_temperature, create_spectral_line_profile
-from image_gen.energy import create_energy_level_diagram
+from image_gen.save_plots import spectrogram_plot, analyze_signal_strength
+from image_gen.spectral_line import create_spectral_line_image, brightness_temp_plot, calculate_brightness_temperature, create_spectral_line_profile, plot_observation_position
+from image_gen.energy import run_fft_processing
 from image_gen.intensity_map import create_intensity_map
 from image_gen.simulate_rotational_vibrational_transitions import simulate_rotational_vibrational_transitions
 from image_gen.position_velocity import create_position_velocity_diagram
-
+from image_gen.gyrosynchrotron import process_frequency_range
 gc.enable()
 
 # Setup logging with a file size limit
@@ -48,6 +48,11 @@ backup_count = 5
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
+logging.getLogger('astropy').setLevel(logging.WARNING)
+logging.getLogger('scipy').setLevel(logging.WARNING)
+logging.getLogger('pywt').setLevel(logging.WARNING)
+logging.getLogger('librosa').setLevel(logging.WARNING)
 
 # Create handlers
 console_handler = logging.StreamHandler()
@@ -64,17 +69,13 @@ logger.addHandler(file_handler)
 
 # Define the speed of light in meters per second
 speed_of_light = 299792458  # meters per second
-delta_lambda = 1e-2  # Change in wavelength in 
-lambda_0 = 0.211      # Rest wavelength in meters (500 nanometers)
 EARTH_ROTATION_RATE = 15  # degrees per hour
 tolerance = 1e6
-
-# Sampling frequency in Hz
 # Low band LO frequency in MHz
 notch_freq = 9750
 # Notch width in MHz
 notch_width = 30
-
+magnetic_field_strength=1
 k_B = 1.38e-23 
 
 class VLA:
@@ -170,24 +171,12 @@ def apply_rotation(data, rotation_angle):
     rotated_data = rotated_data_2d.flatten()
     return rotated_data
 
-def compute_spectrogram(samples, fs):
-    logging.debug(f"Input samples range: {np.min(samples)} to {np.max(samples)}")
-    nfft = 256
-    noverlap = 128
-    spectrogram, frequencies, times, _ = plt.specgram(samples, NFFT=nfft, Fs=fs, noverlap=noverlap)
-    spectrogram = np.where(spectrogram == 0, 1e-10, spectrogram)
-    logging.debug(f"Spectrogram range: {np.min(spectrogram)} to {np.max(spectrogram)}")
-    return spectrogram, frequencies, times
 
-def save_spectrogram_and_signal_strength(signal_data, sampling_rate, output_dir, date, time, lat, lon, duration_hours):
-    spectrogram, frequencies, times = compute_spectrogram(signal_data, sampling_rate)
-    save_plots_to_png(spectrogram, signal_data, frequencies, times, output_dir, date, time, lat, lon, duration_hours)
-
-def find_emission_absorption_lines(freq, fft_values, height_threshold=0.1, distance=20):
-    magnitude = np.abs(fft_values)
-    peaks, _ = find_peaks(magnitude, height=height_threshold, distance=distance)
-    troughs, _ = find_peaks(-magnitude, height=height_threshold, distance=distance)
-    return peaks, troughs
+def save_spectrogram_and_signal_strength(freq, fft_values, sampling_rate, output_dir, date, time, lat, lon, duration_hours):
+    logging.info(f"Generating spectrogram for {date} {time}")
+    logging.debug(f"Spectrogram generated with shape {freq.shape}")
+    spectrogram_plot(freq, fft_values,sampling_rate, output_dir, date, time, lat, lon, duration_hours)
+    logging.info(f"Spectrogram and signal strength plots saved for {date} {time}")
 
 def load_fits_file(filename):
     with fits.open(filename) as hdul:
@@ -232,119 +221,144 @@ def process_fft_file(input_fits, output_dir, fs, date, time, lat, lon, duration,
             data = hdul[0].data + 1j * hdul[1].data
             total_rows = data.shape[0]
             
-        # Create a memory-mapped file for the full dataset
-        full_data = np.memmap(temp_output_file, dtype='complex64', mode='w+', shape=(total_rows,))
+        # Trim data to be a multiple of chunk_size
+        valid_rows = (total_rows // chunk_size) * chunk_size
+        data = data[:valid_rows]
+        
+        full_data = np.memmap(temp_output_file, dtype='complex64', mode='w+', shape=(valid_rows, 2))
 
         with ThreadPoolExecutor(max_workers=24) as executor:
             futures = []
 
-            for start_row in range(0, total_rows, chunk_size):
-                end_row = min(start_row + chunk_size, total_rows)
-                chunk = data[start_row:end_row]
-                futures.append(executor.submit(process_chunk, chunk, fs, full_data, start_row))
+            for chunk_start in range(0, valid_rows, chunk_size):
+                chunk_end = chunk_start + chunk_size
+                chunk = data[chunk_start:chunk_end]
+                futures.append(executor.submit(process_chunk, chunk, fs, full_data, chunk_start, 0.1))
 
-            # Wait for all futures to complete
             for future in futures:
                 future.result()
 
-        # Flush the memmap to ensure all data is written to disk
         full_data.flush()
 
-        # Generate full dataset images
         generate_full_dataset_images(temp_output_file, output_dir, fs, date, time, lat, lon, duration)
 
     except Exception as e:
         logging.error(f"An error occurred while processing {input_fits}: {str(e)}")
     finally:
-        # Delete the temporary file
         if os.path.exists(temp_output_file):
             os.remove(temp_output_file)
             logging.debug(f"Temporary file {temp_output_file} deleted.")
 
-def process_chunk(chunk,fs, full_data, start_row):
-    processed_chunk = compute_fft(chunk, fs, args.center_frequency)
-    if isinstance(processed_chunk, tuple):
-        # Assuming the first element of the tuple is the data we want
-        processed_chunk = processed_chunk[0]
-    full_data[start_row:start_row+processed_chunk.size] = processed_chunk.ravel()
+def process_chunk(chunk, sample_rate, full_data, start_row, threshold):
+    # Perform FFT on the chunk
+    fft_result = np.fft.fft(chunk)
+    freq_bins = np.fft.fftfreq(len(chunk), d=1/sample_rate)
+    logging.debug(f"FFT output shape: {fft_result.shape}")
+
+    # Filter the FFT result
+    mask = np.abs(fft_result) > threshold
+    filtered_fft = fft_result[mask]
+    filtered_freqs = freq_bins[mask]
+    
+    logging.debug(f"Filtered data - mean: {np.mean(filtered_fft)}, std: {np.std(filtered_fft)}")
+    
+    if len(filtered_fft) == 0:
+        return 0
+
+    end_row = start_row + len(filtered_fft)
+    
+    if end_row > full_data.shape[0]:
+        logging.error("Filtered FFT result exceeds full_data capacity.")
+        return 0
+
+    full_data[start_row:end_row, 0] = filtered_freqs
+    full_data[start_row:end_row, 1] = filtered_fft
+
+    return len(filtered_fft)
+
 
 def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon, duration):
-    full_data = np.memmap(data_file, dtype='complex64', mode='r')
-    logging.info(f"Processing data with duration: {args.duration} seconds")
-    duration_hours = args.duration / 3600  # Convert seconds to hours
-    logging.debug(f"Duration in hours: {duration_hours}")
+    file_size = os.path.getsize(data_file)
+    num_rows = file_size // (np.dtype('complex64').itemsize * 2)
 
-    rotation_angle = duration_hours * EARTH_ROTATION_RATE
-    logging.debug(f"Calculated rotation angle: {rotation_angle} degrees")
+    full_data = np.memmap(data_file, dtype='complex64', mode='r', shape=(num_rows, 2))
+    logging.debug("Before compute bandwidth:")
 
-    logging.info("Applying rotation to data")
-    full_data = apply_rotation(full_data, rotation_angle)
+    if full_data.ndim == 2:
+        initial_bandwidth, low_cutoff, high_cutoff, filtered_freq, filtered_fft_values = compute_bandwidth_and_cutoffs(full_data, args.center_frequency)
+    else:
+        logging.error(f"Unexpected data shape: {full_data.shape}")
+    logging.debug(f"Filtered frequency range After Compute Bandwidth: {filtered_freq.min()} to {filtered_freq.max()} Hz")
+    logging.debug("After Compute Bandwidth:")
+    # Handle the error appropriately
+    peaks, troughs = find_emission_absorption_lines(filtered_freq, filtered_fft_values, low_cutoff, high_cutoff)
+    logging.debug("After find emissions:")
+    logging.debug(f"peaks: {peaks}, troughs: {troughs}")
+    logging.debug(f"Bandwidth: {initial_bandwidth}, lowcutoff: {low_cutoff}, highcutoff: {high_cutoff}")
+    logging.debug(f"Filtered frequency range: {filtered_freq.min()} to {filtered_freq.max()} Hz")
+    logging.debug(f"Filtered FFT values range: {np.min(np.abs(filtered_fft_values))} to {np.max(np.abs(filtered_fft_values))}")
+    logging.debug(f"Number of filtered frequency points: {len(filtered_freq)}")
+    logging.debug(f"Number of filtered FFT values: {len(filtered_fft_values)}")
 
-    logging.info("Removing DC offset")
-    full_data = remove_dc_offset(full_data)
-
-    logging.info("Denoising")
-    full_data = denoise_signal(full_data)
-
-    logging.info(f"Removing LNB effect with fs={fs}, notch_freq={notch_freq}, notch_width={notch_width}")
-    full_data = remove_lnb_effect(full_data, fs, notch_freq, notch_width)
-
-    logging.debug(f"Data shape after processing: {full_data.shape}")
-    full_data = (np.abs(full_data) - np.min(np.abs(full_data))) / (np.max(np.abs(full_data)) - np.min(np.abs(full_data)))
-
-
-    initial_bandwidth, low_cutoff, high_cutoff, freq, fft_values = compute_bandwidth_and_cutoffs(full_data, fs, args.center_frequency)
-    peaks, troughs = find_emission_absorption_lines(freq, fft_values,low_cutoff,high_cutoff)
-
+    if args.center_frequency < 1000e6:
+        logging.debug(f"frequency is {filtered_freq.max} < 1000e6")
+        process_frequency_range(filtered_freq,filtered_fft_values,args.center_frequency,output_dir,date,time)
+        if args.center_frequency < 100e6:
+            generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, duration)
+        
     # Generate waterfall image
-    save_waterfall_image(full_data, output_dir, date, time, duration, args.center_frequency, initial_bandwidth,peaks,troughs,low_cutoff,high_cutoff)
+    save_waterfall_image(filtered_freq, filtered_fft_values, output_dir, date, time, duration, args.center_frequency, initial_bandwidth, peaks, troughs, low_cutoff, high_cutoff)
     
-    save_spectrogram_and_signal_strength(full_data, fs, output_dir, date, time, lat, lon, duration)
+    create_intensity_map(filtered_freq,filtered_fft_values, fs, output_dir, date, time,temperature=2.7)
+
+    save_spectrogram_and_signal_strength(filtered_freq, filtered_fft_values, fs, output_dir, date, time, lat, lon, duration)
     
-    calculate_and_save_psd(full_data, args.fs, output_dir, date, time, args.center_frequency, initial_bandwidth)
+    calculate_and_save_psd(filtered_freq, filtered_fft_values, fs, output_dir, date, time, args.center_frequency, initial_bandwidth,low_cutoff,high_cutoff)
 
-    save_spectra(freq, fft_values, peaks, troughs, output_dir, date, time)
-    save_spectra2(freq, fft_values, peaks, troughs, output_dir, date, time)
+    save_spectra(filtered_freq, filtered_fft_values, peaks, troughs, output_dir, date, time)
+    save_enhanced_spectra(filtered_freq, filtered_fft_values, peaks, troughs, output_dir, date, time)
 
-     # Analyze and save signal strength
-    analyze_signal_strength(full_data, output_dir, date, time)
+    #  # Analyze and save signal strength
+    analyze_signal_strength(filtered_freq, filtered_fft_values, output_dir, date, time)
 
-    create_spectral_line_image(freq, fft_values, peaks, troughs, output_dir, date, time)
+    create_spectral_line_image(filtered_fft_values, filtered_fft_values, peaks, troughs, output_dir, date, time)
 
-    brightness_temp_plot(freq, fft_values, peaks, troughs, output_dir, date, time, lat, lon, duration)
+    brightness_temp_plot(filtered_freq,filtered_fft_values, peaks, troughs, output_dir, date, time, lat, lon, duration)
+    plot_observation_position(output_dir,date,time,lat,lon,duration)
 
-    logging.debug(f"Frequency {np.max(freq)}")
-    if np.max(freq) < 100e6:
-        generate_lofar_image(full_data, output_dir, date, time, lat, lon, duration)
-        logging.debug("After Loafar")
+    logging.debug("Processing Energy Brightness Flux")
+    run_fft_processing(filtered_freq,filtered_fft_values,args.center_frequency, output_dir, date, time)
 
-    logging.debug("After p velocity")
-    create_energy_level_diagram(args.center_frequency, output_dir, date, time)
-    logging.debug("After level")
-    create_intensity_map(full_data, fs, output_dir, date, time)
-    logging.debug("After map")
     simulate_rotational_vibrational_transitions(full_data, fs, args.center_frequency, initial_bandwidth, output_dir, date, time)
-    logging.debug("After vibra")
+
     create_position_velocity_diagram(full_data, fs, output_dir, date, time)
-    logging.debug("After vdiag")
+
+
     # Close the memmap
     del full_data
 
-def find_emission_absorption_lines(freq, fft_values, low_cutoff, high_cutoff, height_threshold=0.1, distance=20):
-    # Filter the frequency range
-    mask = (freq >= low_cutoff) & (freq <= high_cutoff)
-    filtered_freq = freq[mask]
-    filtered_fft = fft_values[mask]
-
-    magnitude = np.abs(filtered_fft)
-    peaks, _ = find_peaks(magnitude, height=height_threshold, distance=distance)
-    troughs, _ = find_peaks(-magnitude, height=height_threshold, distance=distance)
-
-    # Convert peak and trough indices back to original frequency array
-    original_peaks = np.where(mask)[0][peaks]
-    original_troughs = np.where(mask)[0][troughs]
-
-    return original_peaks, original_troughs
+def find_emission_absorption_lines(filtered_freq, filtered_fft_values, low_cutoff, high_cutoff):
+    # Apply median filter to smooth the data
+    smoothed_fft = medfilt(filtered_fft_values, kernel_size=5)
+    
+    # Calculate dynamic threshold
+    mean_fft = np.mean(smoothed_fft)
+    std_fft = np.std(smoothed_fft)
+    threshold = mean_fft + 2 * std_fft
+    
+    # Find peaks
+    peak_indices, _ = find_peaks(smoothed_fft, height=threshold, distance=20)
+    peaks = filtered_freq[peak_indices]
+    
+    # Find troughs
+    trough_indices, _ = find_peaks(-smoothed_fft, height=-threshold, distance=20)
+    troughs = filtered_freq[trough_indices]
+    
+    # Remove 0 Hz peaks if present
+    peaks = peaks[peaks != 0]
+    
+    return peaks, troughs
+   
 
 def remove_dc_offset(signal):
     mean_val = np.mean(signal)
@@ -380,63 +394,86 @@ def bandpass_filter(data, fs, lowcut, highcut, order=5):
     logging.debug(f"Filtered data - mean: {np.mean(output_data)}, std: {np.std(output_data)}")
     return output_data.real
 
-def compute_fft(signal_data, sampling_rate, center_frequency):
-    
+def compute_fft(signal_data, sampling_rate, center_frequency, duration, notch_freq, notch_width):
     logging.debug(f"Starting FFT computation - sampling_rate: {sampling_rate}, center_frequency: {center_frequency}")
     logging.debug(f"Input signal_data shape: {signal_data.shape}, dtype: {signal_data.dtype}")
-    # Remove DC component
-    signal_data = amplify_signal(signal_data,2)
+
+    # Calculate rotation angle
+    duration_hours = duration / 3600
+    rotation_angle = duration_hours * EARTH_ROTATION_RATE
+    logging.debug(f"Calculated rotation angle: {rotation_angle} degrees")
+
+    # Apply rotation
+    signal_data = apply_rotation(signal_data, rotation_angle)
+
+    # Remove DC offset
     signal_data = remove_dc_offset(signal_data)
-    logging.debug(f"Signal data after DC offset removal - Mean: {np.mean(signal_data)}, Std: {np.std(signal_data)}")
-    
-    # Apply notch filter
-    n_freq = 60  # Example: removing 60 Hz power line noise
-    signal_data = apply_notch_filter(signal_data, n_freq, sampling_rate)
-    logging.debug(f"Signal data after notch filter - Mean: {np.mean(signal_data)}, Std: {np.std(signal_data)}")
-    
-    # Apply bandpass filter
-    low_cutoff = center_frequency - (0.5e6)  # Adjust this based on your requirements
-    high_cutoff = center_frequency + (0.5e6)  # Adjust this based on your requirements
-    signal_data = bandpass_filter(signal_data, sampling_rate, low_cutoff, high_cutoff)
-    
+
+    # Denoise
+    signal_data = denoise_signal(signal_data)
+
+    # Remove LNB effect
+    signal_data = remove_lnb_effect(signal_data, sampling_rate, notch_freq, notch_width)
+
+    # Existing preprocessing steps
+    signal_data = amplify_signal(signal_data, 2)
+    signal_data = apply_notch_filter(signal_data, 60, sampling_rate)
+    signal_data = bandpass_filter(signal_data, sampling_rate, center_frequency - 0.5e6, center_frequency + 0.5e6)
+
     n = len(signal_data)
     freq = np.fft.fftfreq(n, d=1/sampling_rate)
-    actual_freq = freq * sampling_rate  # Calculate actual frequencies in Hz
-    
-    logging.debug(f"Computed FFT frequencies (actual): {actual_freq[:10]}")  # Display first 10 for brevity
-    
+    actual_freq = freq * sampling_rate
     fft_values = np.fft.fft(signal_data)
-    logging.debug(f"Computed FFT values (first 10): {fft_values[:10]}")  # Display first 10 for brevity
-    
-    # Return only the positive half of the frequencies
-    half_n = n // 2
-    logging.debug(f"FFT output - freq shape: {actual_freq[:half_n].shape}, values shape: {np.abs(fft_values[:half_n]).shape}")
-    return actual_freq[:half_n], np.abs(fft_values[:half_n])
 
-def compute_bandwidth_and_cutoffs(amplified_signal, fs, center_frequency):
-    # Compute FFT
-    freq, fft_values = compute_fft(amplified_signal, fs, center_frequency)
-    logging.debug("Computed FFT frequencies and values.")
-    
-    # Calculate the initial bandwidth based on significant frequencies
-    threshold = np.max(fft_values) * 0.1  # Example threshold at 10% of max value
+    # Combine frequency and FFT values into a 2D array
+    result = np.column_stack((actual_freq, np.abs(fft_values)))
+
+    logging.debug(f"FFT output shape: {result.shape}")
+
+    return result
+
+def compute_bandwidth_and_cutoffs(full_data, center_frequency):
+    freq = full_data[:, 0].real  # Extract real part of frequencies
+    fft_values = np.abs(full_data[:, 1])  # Use magnitude of FFT values
+
+    logging.debug(f"Frequency range: {freq.min()} to {freq.max()} Hz")
+    logging.debug(f"FFT values range: {fft_values.min()} to {fft_values.max()}")
+
+    threshold = np.max(fft_values) * 0.1
     significant_freqs = freq[fft_values > threshold]
     
-    if len(significant_freqs) == 0:
-        initial_bandwidth = 0
+    logging.debug(f"Threshold: {threshold}")
+    logging.debug(f"Number of significant frequencies: {len(significant_freqs)}")
+
+    if len(significant_freqs) < 2:
+        initial_bandwidth = max(freq.max() - freq.min(), 1000)  # Minimum 1 kHz bandwidth
     else:
-        initial_bandwidth = significant_freqs[-1] - significant_freqs[0]
+        initial_bandwidth = max(abs(significant_freqs[-1] - significant_freqs[0]), 1000)
+
+    logging.debug(f"Initial bandwidth: {initial_bandwidth} Hz")
+
+    low_cutoff = max(freq.min(), center_frequency - initial_bandwidth / 2)
+    high_cutoff = min(freq.max(), center_frequency + initial_bandwidth / 2)
     
-    logging.debug(f"Initial Bandwidth: {initial_bandwidth} Hz")
-    
-    # Calculate low and high cutoffs
-    low_cutoff = center_frequency - initial_bandwidth / 2
-    high_cutoff = center_frequency + initial_bandwidth / 2
-    
-    logging.debug(f"Low Cutoff: {low_cutoff} Hz")
-    logging.debug(f"High Cutoff: {high_cutoff} Hz")
-    
-    return initial_bandwidth, low_cutoff, high_cutoff, freq, fft_values
+    if low_cutoff >= high_cutoff:
+        low_cutoff, high_cutoff = freq.min(), freq.max()
+
+    logging.debug(f"Low cutoff: {low_cutoff} Hz")
+    logging.debug(f"High cutoff: {high_cutoff} Hz")
+
+    mask = (freq >= low_cutoff) & (freq <= high_cutoff)
+    filtered_freq = freq[mask]
+    filtered_fft_values = fft_values[mask]
+
+    if len(filtered_freq) == 0:
+        logging.warning("No frequencies left after filtering. Reverting to full frequency range.")
+        filtered_freq = freq
+        filtered_fft_values = fft_values
+
+    logging.debug(f"Number of frequencies after filtering: {len(filtered_freq)}")
+    logging.debug(f"Frequency range After Bandwidth and Cutoff: {filtered_freq.min()} to {filtered_freq.max()} Hz")
+
+    return initial_bandwidth, low_cutoff, high_cutoff, filtered_freq, filtered_fft_values
 
 
 def main(args):

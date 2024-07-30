@@ -59,14 +59,14 @@ def process_chunk(args):
     return f, t + start_time, Sxx
 
 def extract_datetime_from_filename(filename):
-    """Extract datetime from the filename in the format data_YYMMDD_HHMMSS."""
+    """Extract datetime from the filename in the format data_YYMMDD_HHMMSS or data_YYMMDD_HHMMSS_*.fits."""
     basename = os.path.basename(filename)
-    match = re.search(r'\w+_(\d{8}_\d{6})', basename)
+    match = re.search(r'data_(\d{6}_\d{6})', basename)
     if match:
         datetime_str = match.group(1)
-        return datetime.datetime.strptime(datetime_str, '%Y%m%d_%H%M%S')
+        return datetime.datetime.strptime(datetime_str, '%y%m%d_%H%M%S')
     else:
-        raise ValueError("Filename does not match the expected format 'data_YYMMDD_HHMMSS'")
+        raise ValueError("Filename does not match the expected format 'data_YYMMDD_HHMMSS' or 'data_YYMMDD_HHMMSS_*.fits'")
 
 def main():
     parser = argparse.ArgumentParser(description='Generate a spectrogram from a FITS file.')

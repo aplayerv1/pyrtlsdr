@@ -3,6 +3,12 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Setup logging
+logging.basicConfig(level=logging.DEBUG)
+
+def clip_indices(indices, max_value):
+    return np.clip(indices, 0, max_value - 1)
+
 def amplify_signal_with_peaks_troughs(signal, peaks, troughs, amplification_factor=2):
     amplified_signal = signal.copy()
     valid_peaks = peaks[peaks < signal.shape[0]]
@@ -18,6 +24,11 @@ def calculate_brightness_temperature(fft_values_scaled, freq):
     logging.debug(f"Input FFT values range: {np.min(fft_values_scaled)} to {np.max(fft_values_scaled)}")
     logging.debug(f"Frequency range: {np.min(freq)} to {np.max(freq)} Hz")
 
+    # Filter out non-positive frequencies
+    positive_freq_mask = freq > 0
+    freq = freq[positive_freq_mask]
+    fft_values_scaled = fft_values_scaled[:, positive_freq_mask]
+
     with np.errstate(divide='ignore', invalid='ignore'):
         wavelength = np.where(freq != 0, c / freq, 0)
         brightness_temp = np.where(freq != 0, (wavelength**2 * fft_values_scaled) / (2 * k_B), 0)
@@ -31,19 +42,6 @@ def calculate_brightness_temperature(fft_values_scaled, freq):
 
     return brightness_temp
 
-def create_spectral_line_image(freq, fft_values, peaks, troughs, output_dir, date, time):
-    magnitude = np.abs(fft_values)
-    plt.figure(figsize=(10, 6))
-    plt.plot(freq, magnitude, label='Spectrum')
-    plt.plot(freq[peaks], magnitude[peaks], 'ro', label='Emission Lines')
-    plt.plot(freq[troughs], magnitude[troughs], 'bo', label='Absorption Lines')
-    plt.xlabel('Frequency (Hz)')
-    plt.ylabel('Magnitude')
-    plt.title(f'Spectral Line Image ({date} {time})')
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, f'spectral_line_{date}_{time}.png'))
-    plt.close()
-
 def brightness_temp_plot(freq, fft_values, peaks, troughs, output_dir, date, time, lat, lon, duration_hours):
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -52,11 +50,22 @@ def brightness_temp_plot(freq, fft_values, peaks, troughs, output_dir, date, tim
         num_time_steps = int(np.sqrt(len(fft_values)))
         num_freq_steps = len(fft_values) // num_time_steps
         fft_values_2d = fft_values[:num_time_steps*num_freq_steps].reshape(num_time_steps, num_freq_steps)
+
+        logging.debug(f"fft_values_2d shape: {fft_values_2d.shape}")
+        
+        # Convert peaks and troughs to integers and clip to valid range
+        int_peaks = clip_indices(np.round(peaks).astype(int), num_freq_steps)
+        int_troughs = clip_indices(np.round(troughs).astype(int), num_freq_steps)
         
         # Calculate brightness temperature
-        amplified_fft_values = amplify_signal_with_peaks_troughs(fft_values_2d, peaks, troughs, amplification_factor=10000)
+        amplified_fft_values = amplify_signal_with_peaks_troughs(fft_values_2d, int_peaks, int_troughs, amplification_factor=2)
         brightness_temperature_2d = calculate_brightness_temperature(np.abs(amplified_fft_values), freq[:num_freq_steps])
         brightness_temperature_2d = np.log10(brightness_temperature_2d + 1)  # Add 1 to avoid log(0)
+
+        logging.debug(f"Brightness temperature 2D shape: {brightness_temperature_2d.shape}")
+
+        # Normalize brightness temperature for better visualization
+        brightness_temperature_2d = brightness_temperature_2d / np.max(brightness_temperature_2d)
         
         # Create the 2D temperature plot
         fig, ax = plt.subplots(figsize=(12, 8))
@@ -69,16 +78,34 @@ def brightness_temp_plot(freq, fft_values, peaks, troughs, output_dir, date, tim
         ax.set_ylabel('Time (hours)')
         ax.set_title(f'H1 Brightness Temperature: {date} {time}\nLat: {lat:.2f}°, Lon: {lon:.2f}°\nDuration: {duration_hours:.2f} hours')
         
-        cbar = fig.colorbar(im, ax=ax, label='Log Brightness Temperature (K)')
+        cbar = fig.colorbar(im, ax=ax, label='Normalized Log Brightness Temperature')
         
         output_path = os.path.join(output_dir, f'brightness_temperature_2d_{date}_{time}.png')
         plt.savefig(output_path)
         plt.close()
         
+        logging.info(f"Brightness temperature plot saved: {output_path}")
     except Exception as e:
         logging.error(f"Error in brightness_temp_plot: {str(e)}")
-        logging.error(f"FFT values shape: {fft_values.shape}")
-        logging.error(f"Frequency shape: {freq.shape}")
+
+
+def create_spectral_line_image(freq, fft_values, peaks, troughs, output_dir, date, time):
+    magnitude = np.abs(fft_values)
+    plt.figure(figsize=(10, 6))
+    plt.plot(freq, magnitude, label='Spectrum')
+    
+    int_peaks = clip_indices(peaks.astype(int), len(freq))
+    int_troughs = clip_indices(troughs.astype(int), len(freq))
+    
+    plt.plot(freq[int_peaks], magnitude[int_peaks], 'ro', label='Emission Lines')
+    plt.plot(freq[int_troughs], magnitude[int_troughs], 'bo', label='Absorption Lines')
+    
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Magnitude')
+    plt.title(f'Spectral Line Image ({date} {time})')
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, f'spectral_line_{date}_{time}.png'))
+    plt.close()
 
 def plot_observation_position(output_dir, date, time, lat, lon, duration_hours):
     try:

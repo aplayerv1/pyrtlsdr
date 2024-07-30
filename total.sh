@@ -8,13 +8,13 @@ process_frequency_range() {
     local fileappend=$4
 
     # Configuration variables
-    duration=100
+    duration=10
     duration_hours=$(echo "scale=4; $duration / 3600" | bc)
     srf=20e6
     tol=1.6e6
     chunk=2048
     ip=10.10.1.17
-    port=8885
+    port=8886
     workers=24
     lat=41.604730
     lon=-8.464160
@@ -67,11 +67,11 @@ process_frequency_range() {
             echo "Starting Heatmap"
             python3 heatmap.py -i "raw/${filename_w_appended}.fits" -o "images/${filename_w_appended}/" --fs $srf --num-workers $workers --nperseg 2048
 
-            find /home/server/rtl/pyrtl/images/ -type d -empty -delete
-            find /home/server/rtl/pyrtl/raw/ -type d -empty -delete
+            # find /home/server/rtl/pyrtl/images/ -type d -empty -delete
+            # find /home/server/rtl/pyrtl/raw/ -type d -empty -delete
              
-            # Navigate back to the script's directory
-            cd /home/server/rtl/pyrtl
+            # # Navigate back to the script's directory
+            # cd /home/server/rtl/pyrtl
 
             # # Sync processed images to NAS
             # rsync -avh --update images/ "$nas_images_dir/"
@@ -103,12 +103,12 @@ process_frequency_range() {
 cd /home/server/rtl/pyrtl
 
 # Process each frequency range
-process_frequency_range 1420.20e6 1420.60e6 1420.40e6 "1420MHz_HI"
+# process_frequency_range 1420.20e6 1420.60e6 1420.40e6 "1420MHz_HI"
 # process_frequency_range 407.8e6 408.2e6 408e6 "408MHz_Haslam"
 # process_frequency_range 150.8e6 151.2e6 151e6 "151MHz_6C"
-process_frequency_range 30.0e6 80.0e6 50.0e6 "50MHz_8C"
+# process_frequency_range 30.0e6 80.0e6 50.0e6 "50MHz_8C"
 
-# # Additional astronomical frequencies up to 6 GHz
+# # # Additional astronomical frequencies up to 6 GHz
 # process_frequency_range 322.8e6 323.2e6 323e6 "323MHz_Deuterium"
 # process_frequency_range 1610.6e6 1611.0e6 1610.8e6 "1611MHz_OH"
 # process_frequency_range 1665.2e6 1665.6e6 1665.4e6 "1665MHz_OH"
@@ -140,3 +140,14 @@ process_frequency_range 30.0e6 80.0e6 50.0e6 "50MHz_8C"
 # process_frequency_range 20.0e6 30.0e6 25.0e6 "25MHz_Solar_Radio_Bursts"
 # process_frequency_range 45.0e6 50.0e6 47.5e6 "47.5MHz_Interstellar_Absorption"
 # process_frequency_range 95.0e6 100.0e6 97.5e6 "97.5MHz_Solar_Coronal_Loops"
+# process_frequency_range 95.0e6 100.0e6 97.5e6 "97.5MHz_Solar_Coronal_Loops"
+
+# process_frequency_range 100.0e6 6000.0e6 3000.0e6 "Gyrosynchrotron_Emission"
+process_frequency_range 10.0e6 100.0e6 50.0e6 "Solar_Type_I_Burst"
+# process_frequency_range 20.0e6 450.0e6 100.0e6 "Solar_Type_II_Burst"
+# process_frequency_range 10.0e6 500.0e6 150.0e6 "Solar_Type_III_Burst"
+# process_frequency_range 20.0e6 500.0e6 200.0e6 "Solar_Type_IV_Burst"
+# process_frequency_range 20.0e6 200.0e6 100.0e6 "Solar_Type_V_Burst"
+# process_frequency_range 10.0e6 1000.0e6 500.0e6 "Plasma_Emission"
+# process_frequency_range 1000.0e6 6000.0e6 3000.0e6 "Thermal_Bremsstrahlung_Emission"
+# process_frequency_range 30.0e6 300.0e6 150.0e6 "Non_Thermal_Continuum_Emission"

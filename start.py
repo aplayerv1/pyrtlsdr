@@ -5,39 +5,62 @@ import time
 from datetime import datetime
 import logging
 import queue
+import configparser
 
 logging.basicConfig(filename='radio_astronomy.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 file_queue = queue.Queue()
 
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+SETTINGS = config['settings']
+
+IP = SETTINGS.get('ip')
+PORT = SETTINGS.getint('port')
+SRF = SETTINGS.getfloat('srf')
+TOL = SETTINGS.getfloat('tol')
+CHUNK = SETTINGS.getint('chunk')
+WORKERS = SETTINGS.getint('workers')
+LAT = SETTINGS.getfloat('lat')
+LON = SETTINGS.getfloat('lon')
+BASE_DIR = SETTINGS.get('base_directory')
+NAS_IMAGES_DIR = SETTINGS.get('nas_images_dir')
+NAS_RAW_DIR = SETTINGS.get('nas_raw_dir')
+
 def run_range(ffreq, lfreq, srf, duration, ip, port):
-    logging.info(f"Starting range process: {ffreq} to {lfreq}")
-    subprocess.run(["python3", "range.py", ip, str(port), "--start-freq", str(ffreq), "--end-freq", str(lfreq), "--duration", str(duration), "--sample-rate", str(srf)])
-    logging.info(f"Completed range process: {ffreq} to {lfreq}")
+    try:
+        logging.info(f"Starting range process: {ffreq} to {lfreq}")
+        subprocess.run(["python3", "range.py", ip, str(port), "--start-freq", str(ffreq), "--end-freq", str(lfreq), "--duration", str(duration), "--sample-rate", str(srf)], check=True)
+        logging.info(f"Completed range process: {ffreq} to {lfreq}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Range process {ffreq} to {lfreq} failed: {e}")
 
 def process_and_heatmap(file, sfreq, srf, tol, chunk, duration_hours, lat, lon, workers):
-    logging.info(f"Processing file: {file}")
-    filename_w = os.path.splitext(file)[0]
-    subprocess.run(["python3", "process5.py", "-i", f"raw/{file}", "-o", f"images/{filename_w}/",
-                    "--tolerance", str(tol), "--chunk_size", str(chunk), "--fs", str(srf), "--center-frequency", str(sfreq),
-                    "--duration", str(duration_hours), "--latitude", str(lat), "--longitude", str(lon)], check=True)
-    
-    logging.info(f"Generating heatmap for file: {file}")
-    heatmap_result = subprocess.run(["python3", "heatmap.py", "-i", f"raw/{file}", "-o", f"images/{filename_w}/",
-                    "--fs", str(srf), "--num-workers", str(workers), "--nperseg", "2048"], capture_output=True, text=True)
-    
-    if heatmap_result.returncode == 0:
-        logging.info(f"Heatmap generated successfully for file: {file}")
-    else:
-        logging.error(f"Heatmap generation failed for file: {file}")
-        logging.error(f"Heatmap error output: {heatmap_result.stderr}")
+    try:
+        logging.info(f"Processing file: {file}")
+        filename_w = os.path.splitext(file)[0]
+        subprocess.run(["python3", "process5.py", "-i", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
+                        "--tolerance", str(tol), "--chunk_size", str(chunk), "--fs", str(srf), "--center-frequency", str(sfreq),
+                        "--duration", str(duration_hours), "--latitude", str(lat), "--longitude", str(lon)], check=True)
 
-    logging.info(f"Completed processing and heatmap generation for file: {file}")
-    
-    with open('processed_files.log', 'a') as log_file:
-        log_file.write(f"{datetime.now().isoformat()} - Processed: {file}\n")
+        logging.info(f"Generating heatmap for file: {file}")
+        heatmap_result = subprocess.run(["python3", "heatmap.py", "-i", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
+                        "--fs", str(srf), "--num-workers", str(workers), "--nperseg", "2048"], capture_output=True, text=True)
         
+        if heatmap_result.returncode == 0:
+            logging.info(f"Heatmap generated successfully for file: {file}")
+        else:
+            logging.error(f"Heatmap generation failed for file: {file}")
+            logging.error(f"Heatmap error output: {heatmap_result.stderr}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Processing or heatmap generation for file {file} failed: {e}")
+    finally:
+        logging.info(f"Completed processing and heatmap generation for file: {file}")
+        with open('processed_files.log', 'a') as log_file:
+            log_file.write(f"{datetime.now().isoformat()} - Processed: {file}\n")
+
 def process_file_queue():
     while True:
         try:
@@ -51,16 +74,8 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend):
     logging.info(f"Processing frequency range: {ffreq} to {lfreq}")
     duration = 3600
     duration_hours = duration / 3600
-    srf = 20e6
-    tol = 1.6e6
-    chunk = 2048
-    ip = "10.10.1.17"
-    port = 8886
-    workers = 24
-    lat = 41.604730
-    lon = -8.464160
 
-    run_range(ffreq, lfreq, srf, duration, ip, port)
+    run_range(ffreq, lfreq, SRF, duration, IP, PORT)
 
     while True:
         files = [f for f in os.listdir('.') if f.endswith('.fits')]
@@ -71,18 +86,23 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend):
 
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
     new_filename = f"data_{timestamp}_{fileappend}.fits"
-    os.rename(latest_file, f"raw/{new_filename}")
+    
+    try:
+        os.rename(latest_file, f"{BASE_DIR}/raw/{new_filename}")
+    except OSError as e:
+        logging.error(f"Failed to rename file {latest_file} to raw/{new_filename}: {e}")
+        return []
 
     file_queue.put({
         'file': new_filename,
         'sfreq': sfreq,
-        'srf': srf,
-        'tol': tol,
-        'chunk': chunk,
+        'srf': SRF,
+        'tol': TOL,
+        'chunk': CHUNK,
         'duration_hours': duration_hours,
-        'lat': lat,
-        'lon': lon,
-        'workers': workers
+        'lat': LAT,
+        'lon': LON,
+        'workers': WORKERS
     })
 
     logging.info(f"Queued processing for frequency range: {ffreq} to {lfreq}")
@@ -91,32 +111,31 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend):
 def cleanup_and_sync():
     logging.info("Starting cleanup and synchronization process")
     
-    # Remove empty directories
-    subprocess.run("find /home/server/rtl/pyrtl/images/ -type d -empty -delete", shell=True)
-    subprocess.run("find /home/server/rtl/pyrtl/raw/ -type d -empty -delete", shell=True)
+    try:
+        # Remove empty directories
+        subprocess.run(f"find {BASE_DIR}/images/ -type d -empty -delete", shell=True, check=True)
+        subprocess.run(f"find {BASE_DIR}/raw/ -type d -empty -delete", shell=True, check=True)
 
-    # Navigate back to the script's directory
-    os.chdir("/home/server/rtl/pyrtl")
+        # Navigate back to the script's directory
+        os.chdir(BASE_DIR)
 
-    # Sync processed images to NAS
-    nas_images_dir = "/mnt/nas/tests/processed"
-    subprocess.run(f"rsync -avh --update images/ {nas_images_dir}/", shell=True)
+        # Sync processed images to NAS
+        subprocess.run(f"rsync -avh --update images/ {NAS_IMAGES_DIR}/", shell=True, check=True)
 
-    # Sync raw data to NAS
-    nas_raw_dir = "/mnt/nas/tests/capture"
-    subprocess.run(f"rsync -avh --update raw/ {nas_raw_dir}/", shell=True)
+        # Sync raw data to NAS
+        subprocess.run(f"rsync -avh --update raw/ {NAS_RAW_DIR}/", shell=True, check=True)
 
-    # Clean up raw and images directories
-    subprocess.run("find /home/server/rtl/pyrtl/raw/ -type f -mmin +1 -exec rm -r {} \;", shell=True)
-    subprocess.run("find /home/server/rtl/pyrtl/images/ -type f -mmin +1 -exec rm -r {} \;", shell=True)
+        # Clean up raw and images directories
+        subprocess.run(f"find {BASE_DIR}/raw/ -type f -mmin +1 -exec rm -r {{}} \;", shell=True, check=True)
+        subprocess.run(f"find {BASE_DIR}/images/ -type f -mmin +1 -exec rm -r {{}} \;", shell=True, check=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Cleanup and sync failed: {e}")
 
     logging.info("Cleanup and synchronization process completed")
 
-
-
 if __name__ == "__main__":
     logging.info("Starting radio astronomy processing script")
-    os.chdir("/home/server/rtl/pyrtl")
+    os.chdir(BASE_DIR)
     os.makedirs("raw", exist_ok=True)
     os.makedirs("images", exist_ok=True)
 

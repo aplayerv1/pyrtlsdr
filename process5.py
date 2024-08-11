@@ -38,7 +38,7 @@ from image_gen.energy import run_fft_processing
 from image_gen.intensity_map import create_intensity_map
 from image_gen.simulate_rotational_vibrational_transitions import simulate_rotational_vibrational_transitions
 from image_gen.position_velocity import create_position_velocity_diagram
-from image_gen.gyrosynchrotron import process_frequency_range
+from image_gen.gyrosynchrotron import identify_gyrosynchrotron_emission
 gc.enable()
 
 # Setup logging with a file size limit
@@ -190,7 +190,7 @@ def denoise_signal(data, wavelet='db1', level=1):
     new_coeffs = [pywt.threshold(c, value=uthresh, mode='soft') for c in coeffs]
     return pywt.waverec(new_coeffs, wavelet)
 
-def amplify_signal(data, factor=1):
+def amplify_signal(data, factor=2):
     return data * factor
 
 def process_and_save_chunk(chunk, output_file):
@@ -302,7 +302,7 @@ def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon
 
     if args.center_frequency < 1000e6:
         logging.debug(f"frequency is {filtered_freq.max} < 1000e6")
-        process_frequency_range(filtered_freq,filtered_fft_values,args.center_frequency,output_dir,date,time)
+        identify_gyrosynchrotron_emission(filtered_freq,filtered_fft_values,args.center_frequency,output_dir,date,time)
         if args.center_frequency < 100e6:
             generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, duration)
         

@@ -7,18 +7,20 @@ import logging
 import queue
 import configparser
 
+# Set up logging
 logging.basicConfig(filename='radio_astronomy.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 file_queue = queue.Queue()
 
+# Read configuration
 config = configparser.ConfigParser()
 config.read('config.ini')
 
 SETTINGS = config['settings']
-
 IP = SETTINGS.get('ip')
 PORT = SETTINGS.getint('port')
+DURATION = SETTINGS.getint('duration')
 SRF = SETTINGS.getfloat('srf')
 TOL = SETTINGS.getfloat('tol')
 CHUNK = SETTINGS.getint('chunk')
@@ -72,11 +74,12 @@ def process_file_queue():
 
 def process_frequency_range(ffreq, lfreq, sfreq, fileappend):
     logging.info(f"Processing frequency range: {ffreq} to {lfreq}")
-    duration = 3600
+    duration = DURATION
     duration_hours = duration / 3600
 
     run_range(ffreq, lfreq, SRF, duration, IP, PORT)
 
+    # Wait until file is available
     while True:
         files = [f for f in os.listdir('.') if f.endswith('.fits')]
         if files:
@@ -132,12 +135,13 @@ def cleanup_and_sync():
         logging.error(f"Cleanup and sync failed: {e}")
 
     logging.info("Cleanup and synchronization process completed")
-
+    exit()
 if __name__ == "__main__":
     logging.info("Starting radio astronomy processing script")
     os.chdir(BASE_DIR)
     os.makedirs("raw", exist_ok=True)
     os.makedirs("images", exist_ok=True)
+
 
 
     frequency_ranges = [
@@ -206,5 +210,6 @@ if __name__ == "__main__":
 
     # Perform cleanup and synchronization after all processing is done
     cleanup_and_sync()
-
+    
     logging.info("Radio astronomy processing script completed")
+    exit()

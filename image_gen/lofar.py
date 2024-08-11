@@ -2,6 +2,7 @@ import logging
 from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
+import cupy as cp
 from tqdm import tqdm
 from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 from astropy.time import Time
@@ -10,7 +11,6 @@ import os
 from datetime import datetime
 from multiprocessing import Pool
 import gc
-import numba as nb
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -23,13 +23,12 @@ def calculate_coordinates(time, location, altitude, azimuth):
 def calculate_coordinates_wrapper(args):
     return calculate_coordinates(*args)
 
-@nb.njit(boundscheck=False)
 def map_signal_to_sky(ras, decs, signal_data, ra_bins, dec_bins):
-    sky_map = np.zeros((len(dec_bins) - 1, len(ra_bins) - 1), dtype=np.float32)
+    sky_map = cp.zeros((len(dec_bins) - 1, len(ra_bins) - 1), dtype=cp.float32)
     
     for ra, dec, signal in zip(ras, decs, signal_data):
-        ra_idx = np.searchsorted(ra_bins, ra) - 1
-        dec_idx = np.searchsorted(dec_bins, dec) - 1
+        ra_idx = cp.searchsorted(ra_bins, ra) - 1
+        dec_idx = cp.searchsorted(dec_bins, dec) - 1
         
         if 0 <= ra_idx < len(ra_bins) - 1 and 0 <= dec_idx < len(dec_bins) - 1:
             sky_map[dec_idx, ra_idx] += signal
@@ -59,18 +58,18 @@ def generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, 
                 coords = pool.map(calculate_coordinates_wrapper, [(t, location, altitude, azimuth) for t in times])
             
             ras, decs = zip(*coords)
-            ras = np.array(ras, dtype=np.float32)
-            decs = np.array(decs, dtype=np.float32)
+            ras = cp.array(ras, dtype=cp.float32)
+            decs = cp.array(decs, dtype=cp.float32)
 
-            ra_bins = np.linspace(0, 360, 180)
-            dec_bins = np.linspace(-90, 90, 90)
+            ra_bins = cp.linspace(0, 360, 180)
+            dec_bins = cp.linspace(-90, 90, 90)
             
-            fft_values_normalized = (np.abs(filtered_fft_values) - np.min(np.abs(filtered_fft_values))) / (np.max(np.abs(filtered_fft_values)) - np.min(np.abs(filtered_fft_values)))
+            fft_values_normalized = (cp.abs(filtered_fft_values) - cp.min(cp.abs(filtered_fft_values))) / (cp.max(cp.abs(filtered_fft_values)) - cp.min(cp.abs(filtered_fft_values)))
 
             logging.debug('Mapping signal data to sky map.')
             sky_map = map_signal_to_sky(ras, decs, fft_values_normalized, ra_bins, dec_bins)
 
-            non_zero = np.nonzero(sky_map)
+            non_zero = cp.nonzero(sky_map)
             ra_min, ra_max = ra_bins[non_zero[1].min()], ra_bins[non_zero[1].max()]
             dec_min, dec_max = dec_bins[non_zero[0].min()], dec_bins[non_zero[0].max()]
 
@@ -89,7 +88,7 @@ def generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, 
 
             plt.figure(figsize=(8, 4))
             norm = LogNorm(vmin=sky_map.min()+1, vmax=sky_map.max())
-            plt.imshow(sky_map, origin='lower', norm=norm, cmap='hot',
+            plt.imshow(sky_map.get(), origin='lower', norm=norm, cmap='hot',
                     extent=[ra_min_zoomed, ra_max_zoomed, dec_min_zoomed, dec_max_zoomed], aspect='auto')
             plt.colorbar(label='Normalized Signal Intensity')
             plt.xlabel('Right Ascension (degrees)')

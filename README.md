@@ -57,19 +57,19 @@ All key settings for the project are stored in the config.ini file. Below is an 
 
 ini
 
-[settings]
-ip = 10.10.1.17 (this is the IP address of the server)
-port = 8886     (this is the port number for the server)
-duration = 10   (this is the duration of the data capture sessionm in seconds)
-SRF = 20e6      (this is the sampling rate frequency as float)
-tol = 1600000   (this is the tolerance value for frequency adjustments)
-chunk = 2048    (this is the chunk size for processing data)
-workers = 4     (this is the number of worker threads or processes)
-lat = 41.157940 (this is the latitude of the observation site)
-lon = 8.464160  (this is the longitude of the observation site)
-base_directory = /home/server/rtl/pyrtl      (this is the directory where the data is stored)
-nas_images_dir = /mnt/nas/tests/processed    (this is the directory where the images are stored)
-nas_raw_dir = /mnt/nas/tests/capture         (this is the directory where the raw data is stored)
+        [settings]
+        ip = 10.10.1.17 (this is the IP address of the server)
+        port = 8886     (this is the port number for the server)
+        duration = 10   (this is the duration of the data capture sessionm in seconds)
+        SRF = 20e6      (this is the sampling rate frequency as float)
+        tol = 1600000   (this is the tolerance value for frequency adjustments)
+        chunk = 2048    (this is the chunk size for processing data)
+        workers = 4     (this is the number of worker threads or processes)
+        lat = 41.157940 (this is the latitude of the observation site)
+        lon = 8.464160  (this is the longitude of the observation site)
+        base_directory = /home/server/rtl/pyrtl      (this is the directory where the data is stored)
+        nas_images_dir = /mnt/nas/tests/processed    (this is the directory where the images are stored)
+        nas_raw_dir = /mnt/nas/tests/capture         (this is the directory where the raw data is stored)
 
 Key Parameters:
 

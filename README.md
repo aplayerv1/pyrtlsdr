@@ -99,9 +99,9 @@ To change the IP address and port:
 
 ini
 
-[settings]
-ip = your_new_ip_address
-port = your_new_port_number
+    [settings]
+    ip = your_new_ip_address
+    port = your_new_port_number
 
 
 This documentation now accurately describes the usage of config.ini for managing the project's configuration settings.

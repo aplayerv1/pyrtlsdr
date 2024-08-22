@@ -8,7 +8,7 @@ import multiprocessing as mp
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-MAX_MEMORY = 2 * 1024 * 1024 * 1024  # 2GB in bytes
+MAX_MEMORY = 1 * 1024 * 1024 * 1024  # 2GB in bytes
 
 def get_available_memory():
     meminfo = cp.cuda.runtime.memGetInfo()
@@ -127,10 +127,14 @@ def identify_gyrosynchrotron_emission(freq, fft_values, magnetic_field_strength,
     if len(detected_peaks) == 0:
         logging.warning("No peaks detected, skipping harmonic number calculation.")
         harmonic_numbers = np.array([])
+        # Add this condition
+        logging.info("No peaks detected, skipping plotting.")
+        return  # or plt.close() if you want to create an empty plot
     else:
         detected_peaks = np.array(detected_peaks)
         harmonic_numbers = calculate_harmonic_numbers_gpu(detected_peaks, gyrofrequency)
 
+    # Continue with the rest of the plotting code
     plt.figure(figsize=(14, 7))
     for freq_chunk, fft_chunk in chunk_data:
         plt.plot(freq_chunk / 1e6, fft_chunk, label='FFT Magnitude Spectrum', color='black')

@@ -75,8 +75,22 @@ def calculate_and_save_psd(freq, fft_values, sampling_rate, output_dir, date, ti
             plt.ylabel('Power/Frequency (dB/Hz)')
             plt.title(f'Power Spectral Density (Welch Method)\n{date} {time}')
 
-            # Adjust the x-axis limits based on low_cutoff and high_cutoff
-            plt.xlim(low_cutoff, high_cutoff)
+            # Handling cutoff frequencies
+            if low_cutoff <= 0:
+                logging.warning(f"Low cutoff {low_cutoff} is non-positive. Setting to minimum positive value (1 Hz).")
+                low_cutoff = 1  # Set to a minimum positive value
+
+            if high_cutoff <= 0:
+                logging.warning(f"High cutoff {high_cutoff} is non-positive. Setting to minimum positive value (1 Hz).")
+                high_cutoff = max(low_cutoff + 1, 1)  # Ensure high_cutoff is greater than low_cutoff
+
+            # Ensure high_cutoff is greater than low_cutoff
+            if high_cutoff <= low_cutoff:
+                logging.warning(f"High cutoff {high_cutoff} is less than or equal to low cutoff {low_cutoff}. Adjusting high_cutoff.")
+                high_cutoff = low_cutoff + 1  # Ensure there's a valid range
+
+            # Now you can safely apply xlim to the plot
+            plt.xlim(max(0, low_cutoff), high_cutoff)
 
             # Add vertical lines for cutoff frequencies
             plt.axvline(x=low_cutoff, color='g', linestyle='--', label='Low Cutoff')

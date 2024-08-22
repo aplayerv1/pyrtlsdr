@@ -52,57 +52,48 @@ def create_spectrogram(freq, fft_values, fs, chunk_size=1000, max_workers=4):
     return spectrogram, freq, times
 
 def spectrogram_plot(frequency, fft_values, sampling_rate, png_location, date, time, lat, lon, duration_hours):
-    logging.info(f"Starting spectrogram plot generation for {date} {time}")
-    with tqdm(total=1, desc='Generating Spectrogram & Signal_Strength:') as pbar:
+    logging.info(f"Starting basic spectrogram plot generation for {date} {time}")
+    
+    with tqdm(total=1, desc='Generating Basic Spectrogram:') as pbar:
         try:
-            # Apply Hann window
-            window = signal.hann(len(fft_values))
-            fft_values = fft_values * window
-
-            # Create spectrogram
-            f, t, Sxx = signal.spectrogram(fft_values, fs=sampling_rate, nperseg=1024, noverlap=512)
+            # Ensure fft_values is a numpy array
+            fft_values = np.asarray(fft_values)
             
-            # Apply logarithmic scaling
-            Sxx = np.log10(Sxx + 1e-10)
+            if fft_values.ndim != 1:
+                logging.error("fft_values should be a 1D array for this function")
+                raise ValueError("fft_values should be a 1D array")
 
-            # Normalize the spectrogram data
-            Sxx = np.clip(Sxx, 1e-10, None)  # Clip values to avoid log(0) issues
-            Sxx_norm = (Sxx - Sxx.min()) / (Sxx.max() - Sxx.min())
-
+            # Create basic spectrogram
             plt.figure(figsize=(12, 8))
+            plt.specgram(fft_values, Fs=sampling_rate, scale='linear', cmap='viridis')
 
-            # Use LogNorm for color scaling with adjusted vmin and vmax
-            im = plt.pcolormesh(t, f, Sxx_norm, cmap='viridis', norm=LogNorm(vmin=1e-10, vmax=1))
-
-            plt.colorbar(im, label='Normalized Power (dB)')
+            plt.colorbar(label='Power')
             plt.xlabel('Time (s)')
             plt.ylabel('Frequency (Hz)')
-            plt.title(f'Spectrogram {date} {time}\nLat: {lat}, Lon: {lon}')
-
-            # Add contour lines
-            plt.contour(t, f, Sxx, colors='w', linewidths=0.5, alpha=0.3)
+            plt.title(f'Basic Spectrogram {date} {time}\nLat: {lat}, Lon: {lon}')
 
             # Save the plot to a file
-            spectrogram_filename = f'spectrogram_{date}_{time}.png'
+            spectrogram_filename = f'basic_spectrogram_{date}_{time}.png'
             spectrogram_path = os.path.join(png_location, spectrogram_filename)
             plt.savefig(spectrogram_path, dpi=300, format='png', bbox_inches='tight')
-            plt.close()
+            
+            if os.path.exists(spectrogram_path) and os.path.getsize(spectrogram_path) > 0:
+                logging.info(f"Basic spectrogram saved successfully to: {spectrogram_path}")
+            else:
+                logging.error(f"Failed to save basic spectrogram or file is empty: {spectrogram_path}")
 
-            logging.info(f"Spectrogram saved to: {spectrogram_path}")
+            plt.close()
             pbar.update(1)
-            logging.info(f"Spectrogram generation completed for {date} {time}")
+            logging.info(f"Basic spectrogram generation completed for {date} {time}")
+
         except Exception as e:
-            logging.error(f"Error in plot generation: {e}")
-            logging.exception("Detailed traceback:")
+            logging.error(f"Error in basic spectrogram plot generation: {e}")
 
 def analyze_signal_strength(freq, fft_values, output_dir, date, time):
     magnitude = np.abs(fft_values)
-    min_val = np.min(magnitude)
-    max_val = np.max(magnitude)
-    mean_val = np.mean(magnitude)
-    std_val = np.std(magnitude)
+    min_val, max_val, mean_val, std_val = np.min(magnitude), np.max(magnitude), np.mean(magnitude), np.std(magnitude)
 
-    analysis_results = (f"Signal strength - min: {min_val}, max: {max_val}, mean: {mean_val}, std: {std_val}\n")
+    analysis_results = f"Signal strength - min: {min_val}, max: {max_val}, mean: {mean_val}, std: {std_val}\n"
 
     # Plot the distribution of the signal strength values
     plt.figure(figsize=(12, 6))
@@ -114,15 +105,19 @@ def analyze_signal_strength(freq, fft_values, output_dir, date, time):
     plt.savefig(distribution_plot_path)
     plt.close()
 
-    # Plot the signal strength values over frequency
+    # Plot the signal strength values over time
+    time_axis = np.arange(len(magnitude)) / len(magnitude)  # Normalize time to [0, 1]
     plt.figure(figsize=(12, 6))
-    plt.plot(freq, magnitude)
-    plt.title('Signal Strength Over Frequency')
-    plt.xlabel('Frequency (Hz)')
+    plt.plot(time_axis, magnitude)
+    plt.title('Signal Strength Over Time')
+    plt.xlabel('Time (normalized)')
     plt.ylabel('Magnitude')
+    plt.ylim(bottom=0)  # Set y-axis to start from 0
     strength_plot_path = os.path.join(output_dir, f'signal_strength_{date}_{time}.png')
     plt.savefig(strength_plot_path)
     plt.close()
-    
+
     print(f"Distribution plot saved to {distribution_plot_path}")
     print(f"Signal strength plot saved to {strength_plot_path}")
+
+    return analysis_results

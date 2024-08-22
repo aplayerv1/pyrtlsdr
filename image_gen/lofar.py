@@ -23,19 +23,19 @@ def calculate_coordinates(time, location, altitude, azimuth):
 def calculate_coordinates_wrapper(args):
     return calculate_coordinates(*args)
 
-def map_signal_to_sky(ras, decs, signal_data, ra_bins, dec_bins):
-    sky_map = cp.zeros((len(dec_bins) - 1, len(ra_bins) - 1), dtype=cp.float32)
+def map_signal_to_sky_chunk(ras_chunk, decs_chunk, signal_chunk, ra_bins, dec_bins):
+    sky_map_chunk = cp.zeros((len(dec_bins) - 1, len(ra_bins) - 1), dtype=cp.float32)
     
-    for ra, dec, signal in zip(ras, decs, signal_data):
+    for ra, dec, signal in zip(ras_chunk, decs_chunk, signal_chunk):
         ra_idx = cp.searchsorted(ra_bins, ra) - 1
         dec_idx = cp.searchsorted(dec_bins, dec) - 1
         
         if 0 <= ra_idx < len(ra_bins) - 1 and 0 <= dec_idx < len(dec_bins) - 1:
-            sky_map[dec_idx, ra_idx] += signal
+            sky_map_chunk[dec_idx, ra_idx] += signal
     
-    return sky_map
+    return sky_map_chunk
 
-def generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, duration_hours):
+def generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, duration_hours, chunk_size=1000000):
     logging.info('Starting LOFAR image generation.')
 
     with tqdm(total=1, desc='Generating LOFAR Image:') as pbar:
@@ -58,16 +58,34 @@ def generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, 
                 coords = pool.map(calculate_coordinates_wrapper, [(t, location, altitude, azimuth) for t in times])
             
             ras, decs = zip(*coords)
-            ras = cp.array(ras, dtype=cp.float32)
-            decs = cp.array(decs, dtype=cp.float32)
+            ras = np.array(ras, dtype=np.float32)
+            decs = np.array(decs, dtype=np.float32)
+            filtered_fft_values = np.abs(filtered_fft_values)
 
             ra_bins = cp.linspace(0, 360, 180)
             dec_bins = cp.linspace(-90, 90, 90)
-            
-            fft_values_normalized = (cp.abs(filtered_fft_values) - cp.min(cp.abs(filtered_fft_values))) / (cp.max(cp.abs(filtered_fft_values)) - cp.min(cp.abs(filtered_fft_values)))
 
-            logging.debug('Mapping signal data to sky map.')
-            sky_map = map_signal_to_sky(ras, decs, fft_values_normalized, ra_bins, dec_bins)
+            sky_map = cp.zeros((len(dec_bins) - 1, len(ra_bins) - 1), dtype=cp.float32)
+            logging.debug(f'Starting chunked processing with chunk size: {chunk_size}')
+
+            for start in tqdm(range(0, len(filtered_fft_values), chunk_size), desc='Processing Chunks'):
+                end = min(start + chunk_size, len(filtered_fft_values))
+
+                # Transfer chunks to GPU
+                ras_chunk = cp.array(ras[start:end], dtype=cp.float32)
+                decs_chunk = cp.array(decs[start:end], dtype=cp.float32)
+                signal_chunk = cp.array((filtered_fft_values[start:end] - filtered_fft_values.min()) / (filtered_fft_values.max() - filtered_fft_values.min()), dtype=cp.float32)
+
+                # Process chunk
+                sky_map_chunk = map_signal_to_sky_chunk(ras_chunk, decs_chunk, signal_chunk, ra_bins, dec_bins)
+
+                # Accumulate results
+                sky_map += sky_map_chunk
+
+                # Clear GPU memory
+                del ras_chunk, decs_chunk, signal_chunk, sky_map_chunk
+                cp._default_memory_pool.free_all_blocks()
+                gc.collect()
 
             non_zero = cp.nonzero(sky_map)
             ra_min, ra_max = ra_bins[non_zero[1].min()], ra_bins[non_zero[1].max()]

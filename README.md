@@ -105,3 +105,54 @@ ini
 
 
 This documentation now accurately describes the usage of config.ini for managing the project's configuration settings.
+
+Frequency ranges:
+
+Open start.py and modify the ffreq, lfreq, and sfreq values to adjust the frequency range.
+
+        format = (start, stop, center, name, low_cutoff, high_cutoff) 
+
+        frequency_ranges = [
+            (1420.20e6, 1420.60e6, 1420.40e6, "1420MHz_HI", 1420.00e6, 1420.80e6),
+            (407.8e6, 408.2e6, 408e6, "408MHz_Haslam", 407.00e6, 409.00e6),
+            (150.8e6, 151.2e6, 151e6, "151MHz_6C", 150.00e6, 152.00e6),
+            (30.0e6, 80.0e6, 50.0e6, "50MHz_8C", 20.0e6, 80.0e6),
+            (322.8e6, 323.2e6, 323e6, "323MHz_Deuterium", 322.0e6, 324.0e6),
+            (1610.6e6, 1611.0e6, 1610.8e6, "1611MHz_OH", 1609.0e6, 1612.0e6),
+            (1665.2e6, 1665.6e6, 1665.4e6, "1665MHz_OH", 1664.0e6, 1667.0e6),
+            (1667.2e6, 1667.6e6, 1667.4e6, "1667MHz_OH", 1666.0e6, 1668.0e6),
+            (1720.2e6, 1720.6e6, 1720.4e6, "1720MHz_OH", 1719.0e6, 1721.0e6),
+            (2290.8e6, 2291.2e6, 2291e6, "2291MHz_H2CO", 2289.0e6, 2292.0e6),
+            (2670.8e6, 2671.2e6, 2671e6, "2671MHz_RRL", 2669.0e6, 2672.0e6),
+            (3260.8e6, 3261.2e6, 3261e6, "3261MHz_CH", 3259.0e6, 3262.0e6),
+            (3335.8e6, 3336.2e6, 3336e6, "3336MHz_CH", 3334.0e6, 3337.0e6),
+            (3349.0e6, 3349.4e6, 3349.2e6, "3349MHz_CH", 3348.0e6, 3350.0e6),
+            (4829.4e6, 4830.0e6, 4829.7e6, "4830MHz_H2CO", 4828.0e6, 4831.0e6),
+            (5289.6e6, 5290.0e6, 5289.8e6, "5290MHz_OH", 5288.0e6, 5291.0e6),
+            (5885.0e6, 5885.4e6, 5885.2e6, "5885MHz_CH3OH", 5884.0e6, 5886.0e6),
+            (400.0e6, 800.0e6, 600.0e6, "600MHz_Pulsar", 390.0e6, 810.0e6),
+            (1400.0e6, 1400.4e6, 1400.2e6, "1400MHz_Pulsar", 1399.0e6, 1401.0e6),
+            (327.0e6, 327.4e6, 327.2e6, "327MHz_Pulsar", 326.0e6, 328.0e6),
+            (74.0e6, 74.4e6, 74.2e6, "74MHz_Pulsar", 73.0e6, 75.0e6),
+            (408.5e6, 408.9e6, 408.7e6, "408.7MHz_Pulsar", 408.0e6, 409.0e6),
+            (800.0e6, 900.0e6, 850.0e6, "850MHz_Pulsar", 790.0e6, 910.0e6),
+            (1500.0e6, 1500.4e6, 1500.2e6, "1500MHz_Pulsar", 1499.0e6, 1501.0e6),
+            (1427.0e6, 1427.4e6, 1427.2e6, "1427MHz_HI", 1426.0e6, 1428.0e6),
+            (550.0e6, 600.0e6, 575.0e6, "575MHz_HCN", 540.0e6, 610.0e6),
+            (5500.0e6, 5600.0e6, 5550.0e6, "5550MHz_H2O", 5450.0e6, 5650.0e6),
+            (40.0e6, 41.0e6, 40.5e6, "40.5MHz_Galactic_Synchrotron", 39.0e6, 42.0e6),
+            (60.0e6, 65.0e6, 62.5e6, "62.5MHz_Low_Frequency_Interference", 55.0e6, 70.0e6),
+            (80.0e6, 85.0e6, 82.5e6, "82.5MHz_Extragalactic_Radio_Lobes", 75.0e6, 90.0e6),
+            (20.0e6, 30.0e6, 25.0e6, "25MHz_Solar_Radio_Bursts", 15.0e6, 35.0e6),
+            (45.0e6, 50.0e6, 47.5e6, "47.5MHz_Interstellar_Absorption", 40.0e6, 55.0e6),
+            (95.0e6, 100.0e6, 97.5e6, "97.5MHz_Solar_Coronal_Loops", 90.0e6, 105.0e6),
+            (100.0e6, 6000.0e6, 3000.0e6, "Gyrosynchrotron_Emission", 50.0e6, 6050.0e6),
+            (10.0e6, 100.0e6, 50.0e6, "Solar_Type_I_Burst", 5.0e6, 105.0e6),
+            (20.0e6, 450.0e6, 100.0e6, "Solar_Type_II_Burst", 15.0e6, 455.0e6),
+            (10.0e6, 500.0e6, 150.0e6, "Solar_Type_III_Burst", 5.0e6, 505.0e6),
+            (20.0e6, 500.0e6, 200.0e6, "Solar_Type_IV_Burst", 15.0e6, 505.0e6),
+            (20.0e6, 200.0e6, 100.0e6, "Solar_Type_V_Burst", 15.0e6, 205.0e6),
+            (10.0e6, 1000.0e6, 500.0e6, "Plasma_Emission", 5.0e6, 1005.0e6),
+            (1000.0e6, 6000.0e6, 3000.0e6, "Thermal_Bremsstrahlung_Emission", 900.0e6, 6100.0e6),
+            (30.0e6, 300.0e6, 150.0e6, "Non_Thermal_Continuum_Emission", 25.0e6, 305.0e6)
+        ]

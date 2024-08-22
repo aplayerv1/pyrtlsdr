@@ -132,7 +132,7 @@ For example, if you want to change the range of the "1420MHz_HI" frequency, you 
 
 python
 
-(1420.20e6, 1420.60e6, 1420.40e6, "1420MHz_HI", 1420.00e6, 1420.80e6)
+    (1420.20e6, 1420.60e6, 1420.40e6, "1420MHz_HI", 1420.00e6, 1420.80e6)
 
 Example Adjustments
 
@@ -140,7 +140,7 @@ Example Adjustments
 
     python
 
-(1420.20e6, 1420.60e6, 1420.50e6, "1420MHz_HI", 1420.00e6, 1420.80e6)
+    (1420.20e6, 1420.60e6, 1420.50e6, "1420MHz_HI", 1420.00e6, 1420.80e6)
 
 Expand the range by increasing the stop frequency to 1420.70e6 and the high cutoff to 1420.90e6:
 

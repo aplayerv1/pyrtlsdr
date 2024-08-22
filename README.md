@@ -13,8 +13,8 @@ Python Scripts:
 
 Shell Scripts:
 
-    ai.sh: Shell script purpose TBD.
-    aggragate.sh: Possibly related to aggragate.py for automation or aggregation tasks.
+    ai.sh: Shell script is for AI-related tasks, which are looking for wow! signal candidates. (work in progress)
+    aggragate.sh: Related to aggragate.py for automation or aggregation tasks. Combines 2 or more fits files with the same TIME as captured and saves them in a new fits file. (work in progress)
     cleanup.sh: Script for cleaning up files or managing directories.
     start.py: Initiates data capture and processing for a specific frequency range using serverHRF.py.
 

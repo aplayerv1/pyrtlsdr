@@ -1,29 +1,30 @@
-Project Name Radio Astronomy with sdr
+Project Name: Radio Astronomy with SDR
 
 This project directory contains scripts and files for capturing, processing, and analyzing radio frequency data.
 Files and Scripts
+
 Python Scripts:
 
     aggragate.py: Script for aggregating data or results.
     heatmap.py: Generates heatmaps from captured data.
     process5.py: Processes data files for analysis.
     range.py: Captures data over a specified range of frequencies.
-    server.py: Server-side functionality, potentially related to data handling.
+    serverHRF.py: Server-side functionality, potentially related to data handling.
 
 Shell Scripts:
 
     ai.sh: Shell script purpose TBD.
     aggragate.sh: Possibly related to aggragate.py for automation or aggregation tasks.
     cleanup.sh: Script for cleaning up files or managing directories.
-    start.sh: Initiates data capture and processing for a specific frequency range.
-    start2.sh: Alternative start script for a different frequency range.
+    start.py: Initiates data capture and processing for a specific frequency range using serverHRF.py.
 
 Other Files:
 
     README.md: This documentation file.
     requirements.txt: Contains project dependencies.
+    config.ini: Configuration file containing IP, port, and other settings.
 
-Directories:
+Directories
 
     images/: Stores output images or visualizations.
     raw/: Directory for storing raw data files.
@@ -31,54 +32,76 @@ Directories:
 
 Usage
 
-    Capturing Data:
-        Use range.py to capture data over a specified frequency range (ffreq to lfreq).
-        Modify ffreq, lfreq, and sfreq in start.sh and start2.sh for different frequency ranges.
-        Update IP (ip) and port (port) in server.py for server-side configurations.
+Capturing Data:
 
-    Processing Data:
-        Run start.sh or start2.sh to initiate data capture, preprocessing, and analysis.
-        Data processing involves using preprocess.py and process5.py to prepare and analyze data files.
+    Use range.py to capture data over a specified frequency range.
+    Modify ffreq, lfreq, and sfreq in config.ini for different frequency ranges.
+    Update IP (ip), port (port), and other settings in config.ini for server-side configurations.
 
-    Visualization:
-        heatmap.py generates heatmaps based on processed data stored in images/.
+Processing Data:
 
-    Maintenance:
-        Use cleanup.sh for periodic cleaning of unnecessary files or directories (images/, raw/, etc.).
+    Run start.py to initiate data capture, preprocessing, and analysis.
+    Data processing involves using preprocess.py and process5.py to prepare and analyze data files.
 
-Changing IP and Port in Scripts
+Visualization:
 
-To adapt the IP and port settings in server.py, start.sh, and start2.sh:
+    heatmap.py generates heatmaps based on processed data stored in images/.
 
-    Edit Scripts: Open server.py, start.sh, and start2.sh in a text editor.
-    Modify IP and Port: Locate variables ip and port.
-    Update Values: Replace the existing IP address (ip) and port number (port) with your desired settings.
-    Save Changes: After editing, save the scripts with the updated IP and port configurations.
+Maintenance:
 
-Example:
+    Use cleanup.sh for periodic cleaning of unnecessary files or directories (images/, raw/, etc.).
 
-python
+Configuration in config.ini
 
-# server.py
-ip = '10.10.1.143'
-port = 8885
+All key settings for the project are stored in the config.ini file. Below is an example configuration:
 
-# Update IP and port
-ip = 'your_new_ip_address'
+ini
+
+[settings]
+ip = 10.10.1.17 (this is the IP address of the server)
+port = 8886     (this is the port number for the server)
+duration = 10   (this is the duration of the data capture sessionm in seconds)
+SRF = 20e6      (this is the sampling rate frequency as float)
+tol = 1600000   (this is the tolerance value for frequency adjustments)
+chunk = 2048    (this is the chunk size for processing data)
+workers = 4     (this is the number of worker threads or processes)
+lat = 41.157940 (this is the latitude of the observation site)
+lon = 8.464160  (this is the longitude of the observation site)
+base_directory = /home/server/rtl/pyrtl      (this is the directory where the data is stored)
+nas_images_dir = /mnt/nas/tests/processed    (this is the directory where the images are stored)
+nas_raw_dir = /mnt/nas/tests/capture         (this is the directory where the raw data is stored)
+
+Key Parameters:
+
+    ip: IP address for server connections.
+    port: Port number for server connections.
+    duration: Duration of data capture sessions. (in seconds)
+    SRF: Sampling rate frequency. 
+    tol: Tolerance value for frequency adjustments.
+    chunk: Data chunk size for processing.
+    workers: Number of worker threads or processes. 
+    lat, lon: Latitude and longitude coordinates of the observation site.
+    base_directory: Base directory for local data storage.
+    nas_images_dir: Network-attached storage directory for processed images. (this is to move images to a NAS recommended to use a NAS)
+    nas_raw_dir: Network-attached storage directory for raw data capture. (this is to move raw to a NAS recommended to use a NAS)
+
+Changing Settings in config.ini
+
+To modify the project’s configuration:
+
+    Edit config.ini: Open config.ini in a text editor.
+    Modify Desired Values: Adjust the IP address, port, or any other settings as needed.
+    Save Changes: After editing, save the config.ini file with the updated configurations.
+
+Example Update:
+
+To change the IP address and port:
+
+ini
+
+[settings]
+ip = your_new_ip_address
 port = your_new_port_number
 
-bash
 
-# start.sh or start2.sh
-ip=10.10.1.143
-port=8885
-
-# Update IP and port
-ip="your_new_ip_address"
-port=your_new_port_number
-
-Ensure that all instances of IP and port settings are correctly updated across server.py, start.sh, and start2.sh scripts to align with your server configuration and communication requirements.
-Notes
-
-    Adjust file paths and script parameters (duration, srf, tol, chunk) as needed for specific data capture and processing requirements.
-    Refer to individual script headers or comments for detailed usage instructions and options.
+This documentation now accurately describes the usage of config.ini for managing the project's configuration settings.

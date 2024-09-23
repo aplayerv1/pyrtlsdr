@@ -11,85 +11,161 @@ import os
 from datetime import datetime
 from multiprocessing import Pool
 import gc
+from scipy import signal
+import cupy as cp
+from cupyx.scipy.special import erf
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def calculate_coordinates(time, location, altitude, azimuth):
-    altaz = AltAz(obstime=time, location=location)
-    skycoord = SkyCoord(alt=altitude, az=azimuth, frame=altaz)
-    icrs_coord = skycoord.icrs
-    return icrs_coord.ra.deg, icrs_coord.dec.deg
+def calculate_coordinates_gpu(times, location, altitude, azimuth):
+    logging.debug(f"Entering calculate_coordinates_gpu with times: {times}")
+    altaz = cp.array([altitude.value, azimuth.value])
+    logging.debug(f"AltAz: {altaz}")
+   
+    if times.isscalar:
+        julian_dates = cp.array([times.jd])
+    else:
+        julian_dates = cp.array(times.jd)
+   
+    logging.debug(f"Julian dates: {julian_dates[:5]}... (first 5)")
 
-def calculate_coordinates_wrapper(args):
-    return calculate_coordinates(*args)
+    lst = cp.remainder(julian_dates * 360.0 / 86164.0905 + location.lon.deg, 360.0)
+    ha = lst - altaz[1]
+
+    ra = cp.arctan2(cp.sin(ha), cp.cos(ha) * cp.sin(location.lat.rad) + cp.tan(altaz[0]) * cp.cos(location.lat.rad))
+    dec = cp.arcsin(cp.sin(location.lat.rad) * cp.sin(altaz[0]) - cp.cos(location.lat.rad) * cp.cos(altaz[0]) * cp.cos(ha))
+
+    logging.debug(f"Calculated RA: {cp.rad2deg(ra)[:5]}... (first 5)")
+    logging.debug(f"Calculated Dec: {cp.rad2deg(dec)[:5]}... (first 5)")
+    return cp.rad2deg(ra), cp.rad2deg(dec)
 
 def map_signal_to_sky_chunk(ras_chunk, decs_chunk, signal_chunk, ra_bins, dec_bins):
+    logging.debug(f"Entering map_signal_to_sky_chunk with chunks of size: {len(ras_chunk)}")
     sky_map_chunk = cp.zeros((len(dec_bins) - 1, len(ra_bins) - 1), dtype=cp.float32)
-    
+   
     for ra, dec, signal in zip(ras_chunk, decs_chunk, signal_chunk):
         ra_idx = cp.searchsorted(ra_bins, ra) - 1
         dec_idx = cp.searchsorted(dec_bins, dec) - 1
-        
+       
         if 0 <= ra_idx < len(ra_bins) - 1 and 0 <= dec_idx < len(dec_bins) - 1:
             sky_map_chunk[dec_idx, ra_idx] += signal
-    
+   
+    logging.debug(f"Sky map chunk created with shape: {sky_map_chunk.shape}")
     return sky_map_chunk
 
-def generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, duration_hours, chunk_size=1000000):
-    logging.info('Starting LOFAR image generation.')
+def detect_transients(time_domain_data, threshold=3):
+    logging.debug(f"Detecting transients with threshold: {threshold}")
+    mean = np.mean(time_domain_data)
+    std = np.std(time_domain_data)
+    transients = np.where(time_domain_data > mean + threshold * std)[0]
+    logging.debug(f"Detected {len(transients)} transient events")
+    return transients
 
+def generate_spectrogram(time_domain_data, times, output_dir, date, time):
+    logging.debug("Generating spectrogram")
+    plt.figure(figsize=(10, 6))
+   
+    unix_times = times.unix
+    logging.debug(f"Unix times: {unix_times[:5]}... (first 5)")
+   
+    f, t, Sxx = signal.spectrogram(time_domain_data, fs=1.0/np.mean(np.diff(unix_times)))
+    logging.debug(f"Spectrogram shape: f={f.shape}, t={t.shape}, Sxx={Sxx.shape}")
+    
+    plt.pcolormesh(t, f, 10 * np.log10(Sxx), shading='gouraud')
+    plt.ylabel('Frequency [Hz]')
+    plt.xlabel('Time [sec]')
+    plt.title(f'Spectrogram - {date} {time}')
+    plt.colorbar(label='Power/Frequency [dB/Hz]')
+    spectrogram_file = os.path.join(output_dir, f'spectrogram_{date}_{time}.png')
+    plt.savefig(spectrogram_file)
+    plt.close()
+    logging.info(f"Spectrogram saved to: {spectrogram_file}")
+
+def parse_date(date_str):
+    logging.debug(f"Parsing date string: {date_str}")
+    if len(date_str) == 6:
+        year = int('20' + date_str[:2])
+        month = int(date_str[2:4])
+        day = int(date_str[4:6])
+    elif len(date_str) == 8:
+        year = int(date_str[:4])
+        month = int(date_str[4:6])
+        day = int(date_str[6:8])
+    else:
+        logging.warning(f"Invalid date format: {date_str}. Using current date.")
+        return datetime.now()
+    parsed_date = datetime(year, month, day)
+    logging.debug(f"Parsed date: {parsed_date}")
+    return parsed_date
+
+def generate_lofar_image(filtered_fft_values, time_domain_data, freq, output_dir, date, time, lat, lon, duration_hours, chunk_size=1000000):
+    logging.info('Starting LOFAR image generation.')
+    logging.debug(f'Input parameters: date={date}, time={time}, lat={lat}, lon={lon}, duration_hours={duration_hours}')
+    ra_bins = cp.linspace(0, 360, 180)
+    dec_bins = cp.linspace(-90, 90, 90)
+
+    sky_map = cp.zeros((len(dec_bins) - 1, len(ra_bins) - 1), dtype=cp.float32)
     with tqdm(total=1, desc='Generating LOFAR Image:') as pbar:
         os.makedirs(output_dir, exist_ok=True)
         try:
-            logging.debug(f'Input parameters: date={date}, time={time}, lat={lat}, lon={lon}, duration_hours={duration_hours}')
-            date_obj = datetime.strptime(date, '%Y%m%d')
+            date_obj = parse_date(date)
+            logging.debug(f'Parsed date: {date_obj}')
             start_datetime = datetime.combine(date_obj.date(), datetime.strptime(time, '%H%M%S').time())
-            start_time = Time(start_datetime)
+            logging.debug(f'start_datetime: {start_datetime}')
+            start_time = Time(start_datetime.strftime('%Y-%m-%dT%H:%M:%S'), format='isot')
+            logging.debug(f'start_time: {start_time}')
 
             logging.debug(f'Creating time array with duration: {duration_hours} hours')
-            times = start_time + np.linspace(0, duration_hours, len(filtered_fft_values)) * u.hour
+            time_intervals = np.linspace(0, duration_hours * 3600, len(filtered_fft_values))
+            times = Time([t.isot for t in (start_time + time_intervals * u.second)])
+            logging.debug(f'Times array created with shape: {times.shape}')
             location = EarthLocation(lat=lat*u.deg, lon=lon*u.deg)
 
             altitude = 90 * u.deg
             azimuth = 0 * u.deg
 
-            logging.debug('Calculating coordinates in parallel.')
-            with Pool() as pool:
-                coords = pool.map(calculate_coordinates_wrapper, [(t, location, altitude, azimuth) for t in times])
-            
-            ras, decs = zip(*coords)
-            ras = np.array(ras, dtype=np.float32)
-            decs = np.array(decs, dtype=np.float32)
-            filtered_fft_values = np.abs(filtered_fft_values)
+            logging.debug('Calculating coordinates using GPU.')
+            ra_gpu, dec_gpu = calculate_coordinates_gpu(times, location, altitude, azimuth)
+            ras = cp.asnumpy(ra_gpu)
+            decs = cp.asnumpy(dec_gpu)
+            logging.debug(f'Coordinates calculated: {ras[:5]}, {decs[:5]}... (showing first 5)')
 
-            ra_bins = cp.linspace(0, 360, 180)
-            dec_bins = cp.linspace(-90, 90, 90)
-
-            sky_map = cp.zeros((len(dec_bins) - 1, len(ra_bins) - 1), dtype=cp.float32)
             logging.debug(f'Starting chunked processing with chunk size: {chunk_size}')
+
+            ras_gpu = cp.array(ras, dtype=cp.float32)
+            decs_gpu = cp.array(decs, dtype=cp.float32)
+            filtered_fft_values_gpu = cp.array(filtered_fft_values)
 
             for start in tqdm(range(0, len(filtered_fft_values), chunk_size), desc='Processing Chunks'):
                 end = min(start + chunk_size, len(filtered_fft_values))
-
-                # Transfer chunks to GPU
-                ras_chunk = cp.array(ras[start:end], dtype=cp.float32)
-                decs_chunk = cp.array(decs[start:end], dtype=cp.float32)
-                signal_chunk = cp.array((filtered_fft_values[start:end] - filtered_fft_values.min()) / (filtered_fft_values.max() - filtered_fft_values.min()), dtype=cp.float32)
-
-                # Process chunk
+                ras_chunk = ras_gpu[start:end]
+                decs_chunk = decs_gpu[start:end]
+                signal_chunk = filtered_fft_values_gpu[start:end]
                 sky_map_chunk = map_signal_to_sky_chunk(ras_chunk, decs_chunk, signal_chunk, ra_bins, dec_bins)
-
-                # Accumulate results
                 sky_map += sky_map_chunk
-
-                # Clear GPU memory
-                del ras_chunk, decs_chunk, signal_chunk, sky_map_chunk
+                del sky_map_chunk
                 cp._default_memory_pool.free_all_blocks()
                 gc.collect()
 
+            del ras_gpu, decs_gpu, filtered_fft_values_gpu
+            cp._default_memory_pool.free_all_blocks()
+            gc.collect()
+
+            logging.debug('Finished processing chunks. Starting analysis.')
+
+            transient_events = detect_transients(time_domain_data)
+            generate_spectrogram(time_domain_data, times, output_dir, date, time)
+
+            logging.debug('Starting image generation.')
+
             non_zero = cp.nonzero(sky_map)
-            ra_min, ra_max = ra_bins[non_zero[1].min()], ra_bins[non_zero[1].max()]
-            dec_min, dec_max = dec_bins[non_zero[0].min()], dec_bins[non_zero[0].max()]
+            if non_zero[0].size > 0 and non_zero[1].size > 0:
+                ra_min, ra_max = ra_bins[non_zero[1].min()], ra_bins[non_zero[1].max()]
+                dec_min, dec_max = dec_bins[non_zero[0].min()], dec_bins[non_zero[0].max()]
+            else:
+                logging.warning("No non-zero values found in sky_map. Using full range.")
+                ra_min, ra_max = ra_bins[0], ra_bins[-1]
+                dec_min, dec_max = dec_bins[0], dec_bins[-1]
 
             ra_buffer, dec_buffer = 2.0, 2.0
             ra_min = max(0, ra_min - ra_buffer)
@@ -105,7 +181,17 @@ def generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, 
             dec_max_zoomed = min(dec_max, zoom_dec_center + zoom_factor / 2)
 
             plt.figure(figsize=(8, 4))
-            norm = LogNorm(vmin=sky_map.min()+1, vmax=sky_map.max())
+            sky_map_min = sky_map.min().get()
+            sky_map_max = sky_map.max().get()
+
+            logging.debug(f"Sky map min: {sky_map_min}, max: {sky_map_max}")
+
+            if sky_map_min == sky_map_max:
+                logging.warning("Sky map has uniform values. Adjusting for visualization.")
+                sky_map_min -= 1
+                sky_map_max += 1
+
+            norm = LogNorm(vmin=max(sky_map_min, 1e-10), vmax=sky_map_max)
             plt.imshow(sky_map.get(), origin='lower', norm=norm, cmap='hot',
                     extent=[ra_min_zoomed, ra_max_zoomed, dec_min_zoomed, dec_max_zoomed], aspect='auto')
             plt.colorbar(label='Normalized Signal Intensity')
@@ -118,14 +204,21 @@ def generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, 
             plt.ylim(dec_min_zoomed, dec_max_zoomed)
             plt.plot(zoom_ra_center, zoom_dec_center, 'ro', markersize=10)
 
-            output_file = os.path.join(output_dir, f'lofar_sky_map_zoom_{date}_{time}.png')
+            logging.debug('Plotting transient events and spectral lines.')
+
+            for event in transient_events:
+                event_time = times[event]
+                event_ra, event_dec = calculate_coordinates_gpu(event_time, location, altitude, azimuth)
+                plt.plot(event_ra.get(), event_dec.get(), 'g*', markersize=10)
+
+            output_file = os.path.join(output_dir, f'lofar_sky_map_enhanced_{date}_{time}.png')
             plt.savefig(output_file)
             plt.close()
 
-            logging.info(f"LOFAR image saved to: {output_file}")
+            logging.info(f"Enhanced LOFAR image saved to: {output_file}")
             pbar.update(1)
         except Exception as e:
-            logging.error(f"An error occurred while generating LOFAR image: {str(e)}")
+            logging.error(f"An error occurred while generating LOFAR image: {str(e)}", exc_info=True)
             raise
         finally:
             del filtered_fft_values

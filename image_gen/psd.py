@@ -7,11 +7,17 @@ from tqdm import tqdm
 import concurrent.futures
 
 def enhance_fft_values(fft_values):
-    return np.log10(np.abs(fft_values) + 1)
+    logging.debug(f"Enhancing FFT values. Input shape: {fft_values.shape}")
+    enhanced = np.log10(np.abs(fft_values) + 1)
+    logging.debug(f"Enhanced FFT values. Output shape: {enhanced.shape}")
+    return enhanced
 
 def preprocess_fft_values(fft_values, kernel_size=3):
+    logging.debug(f"Preprocessing FFT values. Input shape: {fft_values.shape}")
     denoised_fft_values = signal.medfilt(np.abs(fft_values), kernel_size=kernel_size)
-    return enhance_fft_values(denoised_fft_values)
+    preprocessed = enhance_fft_values(denoised_fft_values)
+    logging.debug(f"Preprocessed FFT values. Output shape: {preprocessed.shape}")
+    return preprocessed
 
 def calculate_and_save_psd(freq, fft_values, sampling_rate, output_dir, date, time, center_frequency, bandwidth, low_cutoff, high_cutoff):
     logging.info(f"Starting PSD calculation for {date} {time}")
@@ -21,12 +27,20 @@ def calculate_and_save_psd(freq, fft_values, sampling_rate, output_dir, date, ti
         logging.debug(f"Frequency range: {freq.min()} to {freq.max()} Hz")
         logging.debug(f"FFT values shape: {fft_values.shape}")
         
+        # Ensure freq and fft_values have the same length
+        min_length = min(len(freq), len(fft_values))
+        freq = freq[:min_length]
+        fft_values = fft_values[:min_length]
+        
+        logging.debug(f"Adjusted lengths - freq: {len(freq)}, fft_values: {len(fft_values)}")
+        
         # Apply preprocessing to FFT values
         preprocessed_fft_values = preprocess_fft_values(fft_values)
         
         def process_segment(segment):
             try:
                 f, psd_segment = signal.welch(segment, fs=sampling_rate, nperseg=1024, scaling='density')
+                logging.debug(f"Processed segment. Shape: {psd_segment.shape}")
                 return f, psd_segment
             except Exception as e:
                 logging.error(f"Error processing segment: {e}")
@@ -113,5 +127,3 @@ def calculate_and_save_psd(freq, fft_values, sampling_rate, output_dir, date, ti
     except Exception as e:
         logging.error(f"An error occurred: {e}")
         logging.exception("Detailed traceback:")
-
-    logging.info(f"PSD calculation completed for {date} {time}")

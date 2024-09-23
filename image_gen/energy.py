@@ -11,17 +11,22 @@ def process_fft_and_plot(center_frequency, freq, fft_values, output_dir, date, t
     try:
         logging.info(f"Starting FFT processing for center frequency {center_frequency / 1e6} MHz")
 
+        # Ensure freq and fft_values have the same length
+        min_length = min(len(freq), len(fft_values))
+        freq = freq[:min_length]
+        fft_values = fft_values[:min_length]
+
         # Compute brightness (specific intensity) from FFT values
         brightness = np.abs(fft_values)
-        logging.debug("Computed brightness from FFT values")
+        logging.debug(f"Computed brightness from FFT values. Shape: {brightness.shape}")
 
         # Apply logarithmic scaling to brightness
         brightness_log = np.log10(brightness + 1e-10)  # Adding a small constant to avoid log(0)
-        logging.debug("Applied logarithmic scaling to brightness")
+        logging.debug(f"Applied logarithmic scaling to brightness. Shape: {brightness_log.shape}")
 
         # Compute flux density by integrating brightness over frequency range
         flux_density = np.trapz(brightness, freq)
-        logging.debug("Computed flux density by integrating brightness")
+        logging.debug(f"Computed flux density: {flux_density}")
 
         # Plot Brightness (Specific Intensity) with logarithmic scale
         plt.figure(figsize=(10, 6))
@@ -41,7 +46,7 @@ def process_fft_and_plot(center_frequency, freq, fft_values, output_dir, date, t
             plt.savefig(output_file)
             logging.info(f"Saved plot to {output_file}")
 
-        plt.show()
+        plt.close()  # Close the plot to free up memory
         logging.info(f'Flux Density for Center Frequency {center_frequency / 1e6} MHz: {flux_density:.2f}')
 
     except Exception as e:

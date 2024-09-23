@@ -1,12 +1,15 @@
 import concurrent.futures
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime
 import logging
 import queue
 import configparser
 import re
+import threading
+import csv
 # Set up logging
 
 logging.basicConfig(filename='radio_astronomy.log', level=logging.INFO,
@@ -33,6 +36,24 @@ BASE_DIR = SETTINGS.get('base_directory')
 NAS_IMAGES_DIR = SETTINGS.get('nas_images_dir')
 NAS_RAW_DIR = SETTINGS.get('nas_raw_dir')
 
+
+# Check if processed_files.dat exists and clear it
+processed_files_path = 'processed_files.dat'
+if os.path.exists(processed_files_path):
+    with open(processed_files_path, 'w') as file:
+        file.write('')
+    logging.info("Cleared processed_files.dat")
+else:
+    logging.info("processed_files.dat does not exist. A new file will be created when processing starts.")
+
+def rename_and_move_file(latest_file, fileappend):
+    timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+    new_filename = f"data_{timestamp}_{fileappend}.fits"
+    try:
+        os.rename(latest_file, f"{BASE_DIR}/raw/{new_filename}")
+        logging.info(f"File renamed and moved: {new_filename}")
+    except OSError as e:
+        logging.error(f"Failed to rename file {latest_file} to raw/{new_filename}: {e}")
 
 def calculate_sampling_rate(ffreq, lfreq, duration, tolerance):
     bandwidth = lfreq - ffreq
@@ -73,7 +94,7 @@ def process_and_heatmap(file, sfreq, srf, tol, chunk, duration_hours, lat, lon, 
         logging.info(f"Current frequency range: {low_cutoff/1e6:.2f} MHz to {high_cutoff/1e6:.2f} MHz")
         logging.info(f"sfreq: {sfreq}")
         filename_w = os.path.splitext(file)[0]
-        subprocess.run([
+        process = subprocess.run([
             "python3", "process5.py", "-i", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
             "--tolerance", str(tol), "--chunk_size", str(chunk), "--fs", str(srf),
             "--center-frequency", str(sfreq), "--duration", str(duration_hours),
@@ -86,6 +107,37 @@ def process_and_heatmap(file, sfreq, srf, tol, chunk, duration_hours, lat, lon, 
             "python3", "heatmap.py", "-i", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
             "--fs", str(srf), "--num-workers", str(workers), "--nperseg", "2048"
         ], capture_output=True, text=True)
+        
+        # logging.info(f"Starting AI process for file: {file}")
+        # ai_result = subprocess.run([
+        #     "python3", "aim.py", "-f", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
+        #     "-c", "1024", "-n", str(workers), "--nperseg", "2048"
+        # ], capture_output=True, text=True)
+        # # Check if the process was successful
+
+        logging.info(f"Aggragate Data")
+
+        aggragate_output = subprocess.run([
+            "python3", "aggregate.py", "-i", f"{BASE_DIR}/raw/", "-o", f"{BASE_DIR}/aggregate/"
+        ], check=True)
+
+        if process.returncode == 0:
+            logging.info(f"Processing completed successfully for file: {file}")
+        else:
+            logging.error(f"Processing failed for file: {file}")
+            logging.error(f"Processing error output: {process.stderr}")
+        
+        if aggragate_output.returncode == 0:
+            logging.info(f"Aggragate Data completed successfully.")
+        else:
+            logging.error(f"Aggragate Data failed.")
+            logging.error(f"Aggragate Data error output: {aggragate_output.stderr}")
+            
+        # if ai_result.returncode == 0:
+        #     logging.info(f"AI process completed successfully for file: {file}")
+        # else:
+        #     logging.error(f"AI process failed for file: {file}")
+        #     logging.error(f"AI error output: {ai_result.stderr}")
         
         if heatmap_result.returncode == 0:
             logging.info(f"Heatmap generated successfully for file: {file}")
@@ -100,30 +152,57 @@ def process_and_heatmap(file, sfreq, srf, tol, chunk, duration_hours, lat, lon, 
             log_file.write(f"{datetime.now().isoformat()} - Processed: {file}\n")
 
 def process_file_queue():
-    max_retries = 3
-    retry_delay = 60  # seconds
-
+    logging.info("process_file_queue started")
+    empty_count = 0
     while True:
         try:
             file_info = file_queue.get(block=False)
-            retries = 0
-            while retries < max_retries:
-                try:
-                    process_and_heatmap(**file_info)
-                    break  # Successfully processed, exit retry loop
-                except IOError as e:
-                    retries += 1
-                    logging.warning(f"I/O error processing {file_info['file']} (attempt {retries}/{max_retries}): {e}")
-                    if retries < max_retries:
-                        logging.info(f"Re-queueing {file_info['file']} for retry in {retry_delay} seconds")
-                        time.sleep(retry_delay)
-                    else:
-                        logging.error(f"Max retries reached for {file_info['file']}, moving to next file")
+            empty_count = 0  # Reset counter when an item is found
+            logging.info(f"Processing file: {file_info['file']}")
+            process_and_heatmap(**file_info)
             file_queue.task_done()
+            logging.info(f"Completed processing file: {file_info['file']}")
         except queue.Empty:
-            time.sleep(1)
-            if file_queue.empty():
-                break
+            empty_count += 1
+            if empty_count % 10 == 0:  # Log every 10th empty check
+                logging.info(f"Queue empty for {empty_count} consecutive checks")
+            time.sleep(0.1)  # Short sleep to prevent busy waiting
+        except Exception as e:
+            logging.error(f"Error processing file: {e}", exc_info=True)
+        finally:
+            log_queue_size()
+
+def process_file_queue():
+    logging.info("process_file_queue started")
+    while True:
+        try:
+            file_info = file_queue.get(block=False)
+            logging.info(f"Processing file: {file_info['file']}")
+            process_and_heatmap(**file_info)
+            file_queue.task_done()
+            logging.info(f"Completed processing file: {file_info['file']}")
+        except queue.Empty:
+            logging.info("File queue is empty. Waiting for new files...")
+            time.sleep(5)  # Wait for 5 seconds before checking again
+        except Exception as e:
+            logging.error(f"Error processing file: {e}", exc_info=True)
+        finally:
+            log_queue_size()
+
+
+
+def log_queue_contents():
+    logging.info("Current queue contents:")
+    for item in list(file_queue.queue):
+        logging.info(f"  {item}")
+        
+def log_queue_size():
+    size = file_queue.qsize()
+    logging.info(f"Current file queue size: {size}")
+    if size > 0:
+        logging.info("Next items in queue:")
+        for i, item in enumerate(list(file_queue.queue)[:5]):
+            logging.info(f"  {i+1}: {item['file']}")
 
 def process_range_queue():
     while True:
@@ -136,92 +215,91 @@ def process_range_queue():
 
 def process_frequency_range(ffreq, lfreq, sfreq, fileappend, low_cutoff, high_cutoff):
     logging.info(f"Processing frequency range: {ffreq} to {lfreq}")
-
-    # Debugging
     logging.debug(f"BASE_DIR: {BASE_DIR}")
-    
-    # Read processed files from .dat file
+   
     processed_files = set()
     try:
         with open('processed_files.dat', 'r') as dat_file:
             processed_files = set(line.strip() for line in dat_file)
+        logging.info(f"Loaded {len(processed_files)} processed files from .dat file")
     except FileNotFoundError:
         logging.info("processed_files.dat not found. Creating a new one.")
-    
-    # Debugging
-    logging.debug(f"Processed files: {processed_files}")
-    
-    # Check for unprocessed files
+   
+    files = [f for f in os.listdir(BASE_DIR) if f.endswith('.fits')]
+    logging.debug(f"Files found in BASE_DIR: {files}")
+
+    for file in files:
+        thread = threading.Thread(target=rename_and_move_file, args=(file, fileappend))
+        thread.start()
+        thread.join()  # Wait for each file to be processed before moving to the next
+
+    logging.info(f"Processed {len(files)} files")
+
     raw_files = [f for f in os.listdir(f"{BASE_DIR}/raw") if f.endswith('.fits')]
-    
-    # Debugging
-    logging.debug(f"Raw files found: {raw_files}")
-    
-    # Extract frequency from file names and match against frequency ranges
+    logging.info(f"Found {len(raw_files)} raw .fits files")
+   
     unprocessed_files = []
     for file in raw_files:
+        logging.debug(f"Checking file: {file}")
         if file not in processed_files:
             file_freq = extract_frequency_from_filename(file)
+            logging.debug(f"File: {file}, Extracted frequency: {file_freq}")
             if file_freq and ffreq <= file_freq <= lfreq:
                 unprocessed_files.append(file)
-    
-    # Debugging
-    logging.debug(f"Unprocessed files: {unprocessed_files}")
-    
-    if unprocessed_files:
-        logging.info(f"Found {len(unprocessed_files)} unprocessed files: {unprocessed_files}")
-        for file in unprocessed_files:
-            file_queue.put({
-                'file': file,
-                'sfreq': sfreq,
-                'srf': calculate_sampling_rate(ffreq, lfreq, DURATION, TOL),
-                'tol': TOL,
-                'chunk': CHUNK,
-                'duration_hours': DURATION / 3600,
-                'lat': LAT,
-                'lon': LON,
-                'workers': WORKERS,
-                'low_cutoff': low_cutoff,
-                'high_cutoff': high_cutoff
-            })
-            # Add to processed files
-            processed_files.add(file)
-    
+                logging.info(f"Added {file} to unprocessed files list")
+            else:
+                logging.debug(f"File {file} frequency {file_freq} not in range {ffreq} to {lfreq}")
+        else:
+            logging.debug(f"File {file} already processed")
+   
+    logging.info(f"Found {len(unprocessed_files)} unprocessed files: {unprocessed_files}")
+   
+    for file in unprocessed_files:
+        logging.info(f"Queueing file for processing: {file}")
+        file_queue.put({
+            'file': file,
+            'sfreq': sfreq,
+            'srf': calculate_sampling_rate(ffreq, lfreq, DURATION, TOL),
+            'tol': TOL,
+            'chunk': CHUNK,
+            'duration_hours': DURATION / 3600,
+            'lat': LAT,
+            'lon': LON,
+            'workers': WORKERS,
+            'low_cutoff': low_cutoff,
+            'high_cutoff': high_cutoff
+        })
+        processed_files.add(file)
+        logging.info(f"Added {file} to processed files set")
+   
     duration = DURATION
     duration_hours = duration / 3600
 
     srf = calculate_sampling_rate(ffreq, lfreq, DURATION, TOL)
 
     range_queue.put((ffreq, lfreq, SRF, duration, IP, PORT))
-
-    # Wait until file is available
-    max_wait_time = 30  # Increased wait time for file creation
+    logging.info(f"Range queue updated. Starting file wait loop.")
+   
+    max_wait_time = 30
     start_time = time.time()
     while True:
-        files = [f for f in os.listdir('.') if f.endswith('.fits')]
+        files = [f for f in os.listdir(BASE_DIR) if f.endswith('.fits')]
+        logging.debug(f"Files found in BASE_DIR: {files}")
+
         if files:
             latest_file = max(files, key=os.path.getctime)
-            timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-            new_filename = f"data_{timestamp}_{fileappend}.fits"
-            try:
-                os.rename(latest_file, f"{BASE_DIR}/raw/{new_filename}")
-                logging.info(f"File renamed and moved: {new_filename}")
-                break  # Exit the loop after successful rename
-            except OSError as e:
-                logging.error(f"Failed to rename file {latest_file}: {e}")
+            logging.info(f"Latest file found: {latest_file}")
+
+            thread = threading.Thread(target=rename_and_move_file, args=(latest_file, fileappend))
+            thread.start()
+
+            break  # Exit the loop after starting the rename thread
+
         if time.time() - start_time > max_wait_time:
             logging.error(f"Timeout waiting for .fits file to be created")
             return
-        time.sleep(1)
 
-    timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-    new_filename = f"data_{timestamp}_{fileappend}.fits"
-   
-    try:
-        os.rename(latest_file, f"{BASE_DIR}/raw/{new_filename}")
-    except OSError as e:
-        logging.error(f"Failed to rename file {latest_file} to raw/{new_filename}: {e}")
-        return list(unprocessed_files)
+        time.sleep(1)
 
     file_queue.put({
                 'file': file,
@@ -240,6 +318,9 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend, low_cutoff, high_cu
     with open('processed_files.dat', 'w') as dat_file:
         for file in processed_files:
             dat_file.write(f"{file}\n")
+
+    thread.join()  # Wait for the rename thread to complete before returning
+
 
 def cleanup_and_sync():
     logging.info("Starting cleanup and synchronization process")
@@ -267,71 +348,84 @@ def cleanup_and_sync():
     logging.info("Cleanup and synchronization process completed")
     exit()
 
+def cleanup_and_sync_with_timeout():
+    cleanup_thread = threading.Thread(target=cleanup_and_sync)
+    cleanup_thread.start()
+    cleanup_thread.join(timeout=60)  # 10 minutes timeout
+    if cleanup_thread.is_alive():
+        logging.error("Cleanup and sync process did not complete within the timeout period")
+
+def read_frequency_ranges(file_path='frequency_ranges.csv'):
+    frequency_ranges = []
+    with open(file_path, 'r') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            frequency_ranges.append((
+                float(row['start_freq']),
+                float(row['end_freq']),
+                float(row['center_freq']),
+                row['name'],
+                float(row['low_cutoff']),
+                float(row['high_cutoff'])
+            ))
+    return frequency_ranges
+
 if __name__ == "__main__":
     logging.info("Starting radio astronomy processing script")
     os.chdir(BASE_DIR)
     os.makedirs("raw", exist_ok=True)
     os.makedirs("images", exist_ok=True)
 
-    frequency_ranges = [
-        (1420.20e6, 1420.60e6, 1420.40e6, "1420MHz_HI", 1420.00e6, 1420.80e6),
-        (407.8e6, 408.2e6, 408e6, "408MHz_Haslam", 407.00e6, 409.00e6),
-        (150.8e6, 151.2e6, 151e6, "151MHz_6C", 150.00e6, 152.00e6),
-        (30.0e6, 80.0e6, 50.0e6, "50MHz_8C", 20.0e6, 80.0e6),
-        (322.8e6, 323.2e6, 323e6, "323MHz_Deuterium", 322.0e6, 324.0e6),
-        (1610.6e6, 1611.0e6, 1610.8e6, "1611MHz_OH", 1609.0e6, 1612.0e6),
-        (1665.2e6, 1665.6e6, 1665.4e6, "1665MHz_OH", 1664.0e6, 1667.0e6),
-        (1667.2e6, 1667.6e6, 1667.4e6, "1667MHz_OH", 1666.0e6, 1668.0e6),
-        (1720.2e6, 1720.6e6, 1720.4e6, "1720MHz_OH", 1719.0e6, 1721.0e6),
-        (2290.8e6, 2291.2e6, 2291e6, "2291MHz_H2CO", 2289.0e6, 2292.0e6),
-        (2670.8e6, 2671.2e6, 2671e6, "2671MHz_RRL", 2669.0e6, 2672.0e6),
-        (3260.8e6, 3261.2e6, 3261e6, "3261MHz_CH", 3259.0e6, 3262.0e6),
-        (3335.8e6, 3336.2e6, 3336e6, "3336MHz_CH", 3334.0e6, 3337.0e6),
-        (3349.0e6, 3349.4e6, 3349.2e6, "3349MHz_CH", 3348.0e6, 3350.0e6),
-        (4829.4e6, 4830.0e6, 4829.7e6, "4830MHz_H2CO", 4828.0e6, 4831.0e6),
-        (5289.6e6, 5290.0e6, 5289.8e6, "5290MHz_OH", 5288.0e6, 5291.0e6),
-        (5885.0e6, 5885.4e6, 5885.2e6, "5885MHz_CH3OH", 5884.0e6, 5886.0e6),
-        (400.0e6, 800.0e6, 600.0e6, "600MHz_Pulsar", 390.0e6, 810.0e6),
-        (1400.0e6, 1400.4e6, 1400.2e6, "1400MHz_Pulsar", 1399.0e6, 1401.0e6),
-        (327.0e6, 327.4e6, 327.2e6, "327MHz_Pulsar", 326.0e6, 328.0e6),
-        (74.0e6, 74.4e6, 74.2e6, "74MHz_Pulsar", 73.0e6, 75.0e6),
-        (408.5e6, 408.9e6, 408.7e6, "408.7MHz_Pulsar", 408.0e6, 409.0e6),
-        (800.0e6, 900.0e6, 850.0e6, "850MHz_Pulsar", 790.0e6, 910.0e6),
-        (1500.0e6, 1500.4e6, 1500.2e6, "1500MHz_Pulsar", 1499.0e6, 1501.0e6),
-        (1427.0e6, 1427.4e6, 1427.2e6, "1427MHz_HI", 1426.0e6, 1428.0e6),
-        (550.0e6, 600.0e6, 575.0e6, "575MHz_HCN", 540.0e6, 610.0e6),
-        (5500.0e6, 5600.0e6, 5550.0e6, "5550MHz_H2O", 5450.0e6, 5650.0e6),
-        (40.0e6, 41.0e6, 40.5e6, "40.5MHz_Galactic_Synchrotron", 39.0e6, 42.0e6),
-        (60.0e6, 65.0e6, 62.5e6, "62.5MHz_Low_Frequency_Interference", 55.0e6, 70.0e6),
-        (80.0e6, 85.0e6, 82.5e6, "82.5MHz_Extragalactic_Radio_Lobes", 75.0e6, 90.0e6),
-        (20.0e6, 30.0e6, 25.0e6, "25MHz_Solar_Radio_Bursts", 15.0e6, 35.0e6),
-        (45.0e6, 50.0e6, 47.5e6, "47.5MHz_Interstellar_Absorption", 40.0e6, 55.0e6),
-        (95.0e6, 100.0e6, 97.5e6, "97.5MHz_Solar_Coronal_Loops", 90.0e6, 105.0e6),
-        (100.0e6, 6000.0e6, 3000.0e6, "Gyrosynchrotron_Emission", 50.0e6, 6050.0e6),
-        (10.0e6, 100.0e6, 50.0e6, "Solar_Type_I_Burst", 5.0e6, 105.0e6),
-        (20.0e6, 450.0e6, 100.0e6, "Solar_Type_II_Burst", 15.0e6, 455.0e6),
-        (10.0e6, 500.0e6, 150.0e6, "Solar_Type_III_Burst", 5.0e6, 505.0e6),
-        (20.0e6, 500.0e6, 200.0e6, "Solar_Type_IV_Burst", 15.0e6, 505.0e6),
-        (20.0e6, 200.0e6, 100.0e6, "Solar_Type_V_Burst", 15.0e6, 205.0e6),
-        (10.0e6, 1000.0e6, 500.0e6, "Plasma_Emission", 5.0e6, 1005.0e6),
-        (1000.0e6, 6000.0e6, 3000.0e6, "Thermal_Bremsstrahlung_Emission", 900.0e6, 6100.0e6),
-        (30.0e6, 300.0e6, 150.0e6, "Non_Thermal_Continuum_Emission", 25.0e6, 305.0e6)
-    ]
-
-
+    frequency_ranges = read_frequency_ranges()
     file_tracking = {}
 
+    logging.info("Starting concurrent execution of range processes")
+
+    # Start the process_file_queue in a separate thread
+    threading.Thread(target=process_file_queue, daemon=True).start()
+
+    no_activity_count = 0
+    max_no_activity = 5  # Exit after 5 consecutive checks with no activity
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        logging.info(f"Submitting file queue processing task")
         executor.submit(process_file_queue)
+        
+        logging.info(f"Submitting range queue processing task")
         executor.submit(process_range_queue)
+        
+        logging.info(f"Submitting {len(frequency_ranges)} frequency range processing tasks")
         future_to_range = {executor.submit(process_frequency_range, *args): args for args in frequency_ranges}
-        for future in concurrent.futures.as_completed(future_to_range):
-            args = future_to_range[future]
+        
+        while True:
+            done, not_done = concurrent.futures.wait(future_to_range.keys(), timeout=60)  # 1 minute timeout
+            
+            new_files = [f for f in os.listdir(BASE_DIR) if f.endswith('.fits')]
+            processes_running = any(p.name() in ['python', 'process5.py', 'range.py', 'heatmap.py'] for p in psutil.process_iter(['name']))
+
+            if not not_done and not new_files and not processes_running and file_queue.empty() and range_queue.empty():
+                no_activity_count += 1
+                logging.info(f"No new files or active processes. Count: {no_activity_count}")
+                if no_activity_count >= max_no_activity:
+                    logging.info("No activity detected for a while. Exiting.")
+                    break
+            else:
+                no_activity_count = 0
+
+            logging.info(f"Completed futures: {len(done)}, Incomplete futures: {len(not_done)}")
+
+            time.sleep(60)  # Wait for 1 minute before checking again
+
+        for future, args in future_to_range.items():
             try:
                 files = future.result()
                 file_tracking[args[3]] = files
-                logging.info(f"Completed range process for {args[3]}")
             except Exception as e:
-                logging.error(f"Range process {args[3]} generated an exception: {e}")
+                logging.error(f"Range process {args[3]} generated an exception: {e}", exc_info=True)
 
-    cleanup_and_sync()
+    logging.info("All range processes completed")
+    logging.info(f"Total processed ranges: {len(file_tracking)}")
+    logging.info("Starting cleanup and synchronization")
+    cleanup_and_sync_with_timeout()
+    logging.info("Script execution completed.")
+    sys.exit(0)

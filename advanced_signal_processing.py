@@ -1,16 +1,18 @@
 import numpy as np
-from scipy import signal
-import pywt
-from scipy.signal import lfilter, medfilt
-from pyemd import emd
-from sklearn.decomposition import FastICA
-from scipy import ndimage
+import cupy as cp
+import multiprocessing as mp
+from multiprocessing import Queue
 import logging
-import cupy as cp
-from cupyx.scipy import signal as cp_signal
-import numpy as np
-import cupy as cp
 from numba import cuda
+import numba
+from scipy import signal, ndimage
+from scipy.signal import lfilter, medfilt
+
+import pywt
+from PyEMD import EMD
+from sklearn.decomposition import FastICA
+
+from cupyx.scipy import signal as cp_signal
 
 # Define the speed of light in meters per second
 speed_of_light = 299792458  # meters per second
@@ -22,6 +24,7 @@ notch_freq = 9750
 notch_width = 30
 magnetic_field_strength=1
 k_B = 1.38e-23 
+gpu_lock = mp.Lock()
 
 def apply_rotation(data, rotation_angle):
     if len(data.shape) != 1:
@@ -238,86 +241,172 @@ def phase_locked_loop(input_signal, fs, fmin, fmax, loop_bw=0.01):
 
     return phi, freq
 
+# Define a lock for multiprocessing to prevent GPU memory conflicts
+gpu_lock = mp.Lock()
+
 @cuda.jit
-def comb_filter_kernel(input_signal, output_signal, fs, notch_freqs, Q):
+def optimized_comb_filter_kernel(fft_chunk, freqs, notch_freqs, Q):
     idx = cuda.grid(1)
-    if idx < input_signal.shape[0]:
-        for freq in notch_freqs:
-            w0 = freq / (0.5 * fs)
-            alpha = np.sin(w0) / (2 * Q)
-            a0 = 1 + alpha
-            a1 = -2 * np.cos(w0)
-            a2 = 1 - alpha
-            b0 = (1 + np.cos(w0)) / 2
-            b1 = -(1 + np.cos(w0))
-            b2 = (1 + np.cos(w0)) / 2
-            
-            if idx >= 2:
-                output_signal[idx] = (b0 * input_signal[idx] + b1 * input_signal[idx-1] + b2 * input_signal[idx-2] - 
-                                      a1 * output_signal[idx-1] - a2 * output_signal[idx-2]) / a0
 
-def comb_filter(input_signal, fs, notch_freq, Q=30):
-    logging.debug(f"Applying CUDA-accelerated comb filter - fs: {fs}, notch_freq: {notch_freq}, Q: {Q}")
-    
-    nyq = 0.5 * fs
-    notch_freqs = np.arange(notch_freq, nyq, notch_freq)
-    
-    d_input_signal = cuda.to_device(input_signal)
-    d_output_signal = cuda.device_array_like(d_input_signal)
-    d_notch_freqs = cuda.to_device(notch_freqs)
-    
-    threads_per_block = 256
-    blocks_per_grid = (input_signal.shape[0] + threads_per_block - 1) // threads_per_block
-    
-    comb_filter_kernel[blocks_per_grid, threads_per_block](d_input_signal, d_output_signal, fs, d_notch_freqs, Q)
-    
-    filtered_signal = d_output_signal.copy_to_host()
-    
-    logging.debug(f"CUDA comb filter completed. Output shape: {filtered_signal.shape}")
-    return filtered_signal
+    if idx < fft_chunk.size:
+        fft_chunk[idx] *= 1.0
 
 
-def empirical_mode_decomposition(signal, num_imfs=None):
-    logging.debug(f"Applying EMD - num_imfs: {num_imfs}")
+def comb_filter(input_signal, fs, notch_freq, Q=2):
+    logging.debug(f"Applying optimized GPU comb filter - fs: {fs}, notch_freq: {notch_freq}, Q: {Q}")
+    
+    if np.all(input_signal == 0):
+        logging.warning("Input signal is all zeros. Skipping comb filter.")
+        return input_signal
+
+    # Define chunk size (adjust as needed based on available GPU memory)
+    chunk_size = 1024 * 1024  # 1M samples per chunk
+
+    # Initialize output array
+    output_signal = np.zeros_like(input_signal)
+
+    # Process the input signal in chunks
+    for chunk_start in range(0, len(input_signal), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(input_signal))
+        signal_chunk = input_signal[chunk_start:chunk_end]
+        
+        logging.debug(f"Processing chunk {chunk_start}-{chunk_end}")
+
+        # Perform FFT on the chunk
+        fft_chunk = np.fft.fft(signal_chunk)
+
+        # GPU processing
+        with cp.cuda.Device(0):
+            mempool = cp.get_default_memory_pool()
+            pinned_mempool = cp.get_default_pinned_memory_pool()
+
+            d_notch_freqs = cp.arange(notch_freq, 0.5 * fs, notch_freq)
+            d_freqs = cp.fft.fftfreq(len(signal_chunk), 1 / fs)
+
+            threads_per_block = 256
+            blocks_per_grid = (len(signal_chunk) + threads_per_block - 1) // threads_per_block
+
+            try:
+                d_fft_chunk = cp.asarray(fft_chunk)
+                optimized_comb_filter_kernel[(blocks_per_grid,), (threads_per_block,)](
+                    d_fft_chunk, d_freqs, d_notch_freqs, Q
+                )
+                cp.cuda.Stream.null.synchronize()
+                filtered_chunk = cp.asnumpy(d_fft_chunk)
+            except cp.cuda.memory.OutOfMemoryError:
+                logging.warning("GPU out of memory. Falling back to CPU processing for this chunk.")
+                filtered_chunk = fft_chunk  # Use original chunk if GPU processing fails
+
+            # Inverse FFT to get time-domain signal
+            output_signal_chunk = np.real(np.fft.ifft(filtered_chunk))
+            output_signal[chunk_start:chunk_end] = output_signal_chunk
+
+            # Free memory after processing this chunk
+            mempool.free_all_blocks()
+            pinned_mempool.free_all_blocks()
+
+        logging.debug(f"Processed chunk {chunk_start}-{chunk_end}")
+
+    logging.debug(f"Comb filter processing complete. Output signal shape: {output_signal.shape}")
+    return output_signal
+
+def empirical_mode_decomposition(signal, num_imfs):
+    logging.debug(f"Applying EMD() - num_imfs: {num_imfs}")
+    
+    if signal is None or len(signal) == 0:
+        logging.error("Input signal is None or empty")
+        return np.array([]), np.array([])
+    
     logging.debug(f"Input signal shape: {signal.shape}")
 
     try:
-        imfs = emd(signal, None, num_imfs)
-        if imfs is None or len(imfs) == 0:
-            # Fallback: treat the entire signal as a single IMF
+        # Ensure signal is a 1D numpy array
+        signal = np.array(signal).reshape(-1)
+        
+        # Create an instance of the EMD() class
+        emd = EMD()
+        
+        # Perform the decomposition
+        imfs = emd.emd(signal, max_imf=num_imfs)
+        
+        logging.debug(f"IMFs type: {type(imfs)}")
+        logging.debug(f"IMFs shape: {imfs.shape if isinstance(imfs, np.ndarray) else 'Not a numpy array'}")
+
+        if imfs is None or (isinstance(imfs, np.ndarray) and imfs.size == 0):
             imfs = np.array([signal])
             logging.warning("EMD returned None or empty. Using original signal as single IMF.")
         
-        logging.debug(f"Number of IMFs extracted: {imfs.shape[0]}")
-        logging.debug(f"IMFs shape: {imfs.shape}")
+        if isinstance(imfs, np.ndarray):
+            logging.debug(f"Number of IMFs extracted: {imfs.shape[0]}")
+            logging.debug(f"IMFs shape: {imfs.shape}")
 
-        residual = signal - np.sum(imfs, axis=0)
-        logging.debug(f"Residual shape: {residual.shape}")
+            residual = signal - np.sum(imfs, axis=0)
+            logging.debug(f"Residual shape: {residual.shape}")
+        else:
+            logging.error(f"Unexpected IMFs type: {type(imfs)}")
+            return np.array([signal]), np.zeros_like(signal)
 
         return imfs, residual
     except Exception as e:
-        logging.error(f"Error in EMD: {str(e)}")
-        # Fallback: return original signal as single IMF and zero residual
+        logging.error(f"Error in EMD: {str(e)}", exc_info=True)
         return np.array([signal]), np.zeros_like(signal)
 
-def emd_denoise(signal, num_imfs=None, noise_threshold=0.1):
-    """
-    Denoise signal using EMD by removing low-amplitude IMFs.
-    """
-    logging.debug(f"Applying EMD denoising - num_imfs: {num_imfs}, noise_threshold: {noise_threshold}")
+
+def emd_denoising(signal, num_imfs=1, noise_threshold=0.1):
+    logging.debug(f"EMD denoising - num_imfs: {num_imfs}, noise_threshold: {noise_threshold}")
     logging.debug(f"Input signal shape: {signal.shape}")
 
-    imfs, residual = empirical_mode_decomposition(signal, num_imfs)
+    try:
+        # Ensure signal is a 1D numpy array
+        signal = np.array(signal).reshape(-1)
+        
+        # Create an instance of the EMD class
+        emd = EMD()
+        
+        # Perform the decomposition
+        imfs = emd.emd(signal, max_imf=num_imfs)
+        
+        logging.debug(f"IMFs type: {type(imfs)}")
+        logging.debug(f"IMFs shape: {imfs.shape if isinstance(imfs, np.ndarray) else 'Not a numpy array'}")
 
-    significant_imfs = [imf for imf in imfs if np.max(np.abs(imf)) > noise_threshold * np.max(np.abs(signal))]
-    logging.debug(f"Number of significant IMFs: {len(significant_imfs)}")
+        if not isinstance(imfs, np.ndarray):
+            logging.error(f"IMFs is not a numpy array. Type: {type(imfs)}")
+            return signal
 
-    denoised_signal = np.sum(significant_imfs, axis=0) + residual
-    logging.debug(f"Denoised signal shape: {denoised_signal.shape}")
-    logging.debug(f"Max amplitude before denoising: {np.max(np.abs(signal))}")
-    logging.debug(f"Max amplitude after denoising: {np.max(np.abs(denoised_signal))}")
-
-    return denoised_signal
+        if imfs.size == 0:
+            logging.error("EMD returned no IMFs")
+            return signal  # Return original signal if EMD fails
+        
+        # For num_imfs=1, we don't need to do energy-based filtering
+        if num_imfs == 1:
+            denoised_signal = imfs[0] if imfs.ndim > 1 else imfs
+        else:
+            # Calculate energy of each IMF
+            imf_energies = np.sum(np.square(imfs), axis=1)
+            total_energy = np.sum(imf_energies)
+            
+            logging.debug(f"imf_energies type: {type(imf_energies)}, shape: {imf_energies.shape}")
+            logging.debug(f"total_energy type: {type(total_energy)}, value: {total_energy}")
+            
+            # Identify significant IMFs
+            try:
+                energy_ratio = imf_energies / total_energy
+                logging.debug(f"energy_ratio type: {type(energy_ratio)}, shape: {energy_ratio.shape}")
+                significant_imfs = imfs[energy_ratio > noise_threshold]
+                logging.debug(f"Number of significant IMFs: {significant_imfs.shape[0]}")
+            except Exception as e:
+                logging.error(f"Error during energy calculation: {str(e)}", exc_info=True)
+                return signal
+            
+            # Reconstruct signal using significant IMFs
+            denoised_signal = np.sum(significant_imfs, axis=0)
+        
+        logging.debug(f"Denoised signal shape: {denoised_signal.shape}")
+        
+        return denoised_signal
+    except Exception as e:
+        logging.error(f"Error in EMD: {str(e)}", exc_info=True)
+        return signal  # Return original signal if an error occurs
 
 def independent_component_analysis(signals, n_components=None):
     logging.debug(f"Applying ICA - n_components: {n_components}")
@@ -431,7 +520,53 @@ def bandpass_filter(fft_data, freq, center_freq, bandwidth):
     
     return filtered_fft
 
+def process_signal(time_domain_signal):
+    logging.debug("Time domain signal data:")
+    logging.debug(f"Type: {type(time_domain_signal)}")
+    logging.debug(f"Shape: {time_domain_signal.shape if hasattr(time_domain_signal, 'shape') else 'No shape (not a numpy array)'}")
+    logging.debug(f"Data type: {time_domain_signal.dtype if hasattr(time_domain_signal, 'dtype') else 'No dtype (not a numpy array)'}")
+    
+    # Print some statistics
+    if isinstance(time_domain_signal, np.ndarray):
+        logging.debug(f"Min value: {np.min(time_domain_signal)}")
+        logging.debug(f"Max value: {np.max(time_domain_signal)}")
+        logging.debug(f"Mean value: {np.mean(time_domain_signal)}")
+        logging.debug(f"Standard deviation: {np.std(time_domain_signal)}")
+    
+    # Print first few and last few elements
+    if len(time_domain_signal) > 10:
+        logging.debug("First 5 elements: " + str(time_domain_signal[:5]))
+        logging.debug("Last 5 elements: " + str(time_domain_signal[-5:]))
+    else:
+        logging.debug("All elements: " + str(time_domain_signal))
+    
+    # Check for NaN or infinite values
+    if isinstance(time_domain_signal, np.ndarray):
+        nan_count = np.isnan(time_domain_signal).sum()
+        inf_count = np.isinf(time_domain_signal).sum()
+        logging.debug(f"Number of NaN values: {nan_count}")
+        logging.debug(f"Number of infinite values: {inf_count}")
+        if nan_count > 0 or inf_count > 0:
+            logging.warning("NaN or infinite values detected in time domain signal.")
 
+    # Check for negative values
+    if isinstance(time_domain_signal, np.ndarray):
+        negative_count = np.sum(time_domain_signal < 0)
+        logging.debug(f"Number of negative values: {negative_count}")
+
+        if negative_count > 0:
+            logging.warning("Negative values detected in time domain signal.")
+
+    # Check for zero values
+    if isinstance(time_domain_signal, np.ndarray):
+        zero_count = np.sum(time_domain_signal == 0)
+        logging.debug(f"Number of zero values: {zero_count}")
+
+        if zero_count > 0:
+            logging.warning("Zero values detected in time domain signal.")
+
+
+                                 
 def advanced_signal_processing_pipeline(filtered_freq, filtered_fft, fs, center_frequency, initial_bandwidth, rotation_angle, **kwargs):
     """
     Apply a comprehensive signal processing pipeline to the input signal.
@@ -510,12 +645,14 @@ def advanced_signal_processing_pipeline(filtered_freq, filtered_fft, fs, center_
     
     # Apply phase-locked loop
     _, time_domain_signal = phase_locked_loop(time_domain_signal, fs, fmin=fmin, fmax=fmax, loop_bw=loop_bw)
-    
+    logging.debug("-------------------------------------------------------------")
+    process_signal(time_domain_signal)
     # Apply comb filtering
     time_domain_signal = comb_filter(time_domain_signal, fs, comb_notch_freq, quality_factor)
-    
-    # Apply empirical mode decomposition denoising
-    time_domain_signal = emd_denoise(time_domain_signal, num_imfs=num_imfs, noise_threshold=noise_threshold)
+    logging.debug("/////////////////////////////////////////////////////////////")
+
+    process_signal(time_domain_signal)
+    time_domain_signal = emd_denoising(time_domain_signal, num_imfs=1, noise_threshold=noise_threshold)
     
     # Apply ICA-based denoising if noise reference is provided
     if noise_reference is not None:
@@ -524,5 +661,5 @@ def advanced_signal_processing_pipeline(filtered_freq, filtered_fft, fs, center_
     # Apply matched filtering if template is provided
     if template is not None:
         time_domain_signal = matched_filter(time_domain_signal, template)
-    
+    logging.debug(f"Processed signal shape: {time_domain_signal.shape}, dtype: {time_domain_signal.dtype}")
     return time_domain_signal

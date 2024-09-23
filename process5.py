@@ -27,6 +27,7 @@ from image_gen.position_velocity import create_position_velocity_diagram
 from image_gen.gyrosynchrotron import identify_gyrosynchrotron_emission
 from advanced_signal_processing import advanced_signal_processing_pipeline
 from compute_bandwidth import compute_bandwidth_and_cutoffs, process_chunk, compute_gpu_fft, cyclostationary_feature_detection, classify_signals
+import cupy as cp
 
 # Setup logging
 log_file = "output.log"
@@ -177,6 +178,32 @@ def process_fft_file(input_fits, output_dir, fs, date, time, lat, lon, duration,
             os.remove(temp_output_file)
             logging.debug(f"Temporary file {temp_output_file} deleted.")
 
+def perform_gpu_fft(time_domain_signal, chunk_size=1024*1024):
+    result = np.zeros_like(time_domain_signal, dtype=np.complex128)
+    
+    for i in range(0, len(time_domain_signal), chunk_size):
+        chunk = time_domain_signal[i:i+chunk_size]
+        
+        try:
+            # Transfer chunk to GPU
+            data_gpu = cp.asarray(chunk)
+            
+            # Perform FFT on chunk
+            fft_result = cp.fft.fft(data_gpu)
+            
+            # Transfer result back to CPU
+            result[i:i+chunk_size] = cp.asnumpy(fft_result)
+        except cp.cuda.memory.OutOfMemoryError:
+            # Fallback to CPU FFT if GPU memory allocation fails
+            result[i:i+chunk_size] = np.fft.fft(chunk)
+        
+        # Clear GPU memory
+        cp.get_default_memory_pool().free_all_blocks()
+    
+    return result
+
+
+
 def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon, duration,center_frequency,low_cutoff,high_cutoff):
     file_size = os.path.getsize(data_file)
     num_rows = file_size // (np.dtype('complex64').itemsize * 2)
@@ -190,7 +217,9 @@ def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon
         logging.error(f"Unexpected data shape: {full_data.shape}")
 
     filtered_fft_values = advanced_signal_processing_pipeline(filtered_freq, filtered_fft_values, fs, center_frequency, initial_bandwidth, EARTH_ROTATION_RATE)
-
+    logging.debug(f"Filtered frequency range After Compute Bandwidth: {filtered_freq.min()} to {filtered_freq.max()} Hz")
+    # fft_nottime = perform_gpu_fft(filtered_fft_values)
+    logging.debug("After No time")
     logging.debug(f"Filtered frequency range After Compute Bandwidth: {filtered_freq.min()} to {filtered_freq.max()} Hz")
     
     peaks, troughs = find_emission_absorption_lines(filtered_freq, filtered_fft_values, low_cutoff, high_cutoff)
@@ -203,9 +232,9 @@ def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon
 
     if args.center_frequency < 1000e6:
         identify_gyrosynchrotron_emission(filtered_freq, filtered_fft_values, center_frequency, output_dir, date, time)
-        if args.center_frequency < 100e6:
-            generate_lofar_image(filtered_fft_values, output_dir, date, time, lat, lon, duration)
-        
+        if args.center_frequency < 250e6:
+            generate_lofar_image(filtered_fft_values,filtered_fft_values, filtered_freq, output_dir, date, time, lat, lon, duration)
+            
     save_waterfall_image(filtered_freq, filtered_fft_values, output_dir, date, time, duration, center_frequency, initial_bandwidth, peaks, troughs, low_cutoff, high_cutoff)
     
     create_intensity_map(filtered_freq, filtered_fft_values, fs, output_dir, date, time, temperature=2.7)
@@ -220,28 +249,61 @@ def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon
 
     logging.debug("Processing Energy Brightness Flux")
     run_fft_processing(filtered_freq, filtered_fft_values, center_frequency, output_dir, date, time)
-    simulate_rotational_vibrational_transitions(full_data, fs, center_frequency, initial_bandwidth, output_dir, date, time)
-    create_position_velocity_diagram(full_data, fs, output_dir, date, time)
-
+    simulate_rotational_vibrational_transitions(filtered_fft_values, fs, center_frequency, initial_bandwidth, output_dir, date, time)
+    create_position_velocity_diagram(filtered_fft_values, fs, output_dir, date, time)
+    
     del full_data
 
+
 def find_emission_absorption_lines(filtered_freq, filtered_fft_values, low_cutoff, high_cutoff):
-    smoothed_fft = medfilt(filtered_fft_values, kernel_size=5)
-    mean_fft = np.mean(smoothed_fft)
-    std_fft = np.std(smoothed_fft)
+    logging.debug(f"Input shapes: filtered_freq: {filtered_freq.shape}, filtered_fft_values: {filtered_fft_values.shape}")
+
+    # Separate real and imaginary parts
+    real_part = np.real(filtered_fft_values)
+    imag_part = np.imag(filtered_fft_values)
+
+    logging.debug(f"Real part shape: {real_part.shape}, Imag part shape: {imag_part.shape}")
+
+    # Apply median filter to real and imaginary parts separately
+    smoothed_real = medfilt(real_part, kernel_size=5)
+    smoothed_imag = medfilt(imag_part, kernel_size=5)
+
+    logging.debug(f"Smoothed real shape: {smoothed_real.shape}, Smoothed imag shape: {smoothed_imag.shape}")
+
+    # Recombine the smoothed parts
+    smoothed_fft = smoothed_real + 1j * smoothed_imag
+
+    # Calculate magnitude of the smoothed FFT
+    magnitude_fft = np.abs(smoothed_fft)
+
+    logging.debug(f"Magnitude FFT shape: {magnitude_fft.shape}")
+
+    mean_fft = np.mean(magnitude_fft)
+    std_fft = np.std(magnitude_fft)
     threshold = mean_fft + 2 * std_fft
-    
-    peak_indices, _ = find_peaks(smoothed_fft, height=threshold, distance=20)
-    peaks = filtered_freq[peak_indices]
-    
-    trough_indices, _ = find_peaks(-smoothed_fft, height=-threshold, distance=20)
-    troughs = filtered_freq[trough_indices]
-    
-    peaks = peaks[peaks != 0]
-    
+
+    logging.debug(f"Threshold: {threshold}")
+
+    try:
+        peak_indices, _ = find_peaks(magnitude_fft, height=threshold, distance=20)
+        peaks = filtered_freq[peak_indices]
+
+        trough_indices, _ = find_peaks(-magnitude_fft, height=-threshold, distance=20)
+        troughs = filtered_freq[trough_indices]
+
+        peaks = peaks[peaks != 0]
+
+        logging.debug(f"Number of peaks found: {len(peaks)}")
+        logging.debug(f"Number of troughs found: {len(troughs)}")
+
+    except Exception as e:
+        logging.error(f"Error in find_peaks: {str(e)}", exc_info=True)
+        return [], []
+
     return peaks, troughs
 
 def main(args):
+    import sys
     try:
         input_fits = args.input_fits
         output_dir = args.output_dir
@@ -272,7 +334,7 @@ def main(args):
             print("Signal processing and image generation completed successfully.")
         else:
             print("Failed to extract start time from FITS file.")
-
+        sys.exit(0)
     except Exception as e:
         logging.error(f"An error occurred: {str(e)}")
         print(f"An error occurred: {str(e)}")

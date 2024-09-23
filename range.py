@@ -23,6 +23,7 @@ def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate,
     data = bytearray()
     start_time = time.time()
     last_data_time = start_time
+    elapsed_time = 0  # Initialize elapsed_time here
     client_socket.settimeout(5.0)  # Set a timeout for recv
 
     while True:
@@ -46,8 +47,7 @@ def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate,
             print(f"Error receiving data: {e}")
             break
 
-        current_time = time.time()
-        elapsed_time = current_time - start_time
+        elapsed_time = time.time() - start_time  # Update elapsed_time here
         print(f"Elapsed time: {elapsed_time:.2f} seconds")
 
     client_socket.close()
@@ -81,6 +81,7 @@ def capture_data(server_address, start_freq, end_freq, single_freq, sample_rate,
         print("Received only zero values. FITS file not created.")
 
     print(f"Received {len(data)} bytes over {elapsed_time:.2f} seconds")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='RTL-SDR Data Capture Client')

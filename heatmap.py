@@ -69,6 +69,16 @@ def extract_datetime_from_filename(filename):
         raise ValueError("Filename does not match the expected format 'data_YYMMDD_HHMMSS' or 'data_YYMMDD_HHMMSS_*.fits'")
 
 def main():
+    import sys
+    import os
+    import argparse
+    import multiprocessing as mp
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from astropy.io import fits
+    from tqdm import tqdm
+    from datetime import datetime
+
     parser = argparse.ArgumentParser(description='Generate a spectrogram from a FITS file.')
     parser.add_argument('-i', '--input', type=str, required=True, help='Input FITS file')
     parser.add_argument('-o', '--output', type=str, required=True, help='Output directory for the spectrogram image')
@@ -125,6 +135,6 @@ def main():
     plt.savefig(output_path, dpi=300)
     plt.close()
     print(f"Spectrogram saved to {output_path}")
-
+    sys.exit(0)
 if __name__ == "__main__":
     main()

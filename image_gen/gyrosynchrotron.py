@@ -5,10 +5,11 @@ import os
 import concurrent.futures
 import logging
 import multiprocessing as mp
+from cupyx import jit
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-MAX_MEMORY = 1 * 1024 * 1024 * 1024  # 2GB in bytes
+MAX_MEMORY = 1 * 1024 * 1024 * 1024  # 1GB in bytes
 
 def get_available_memory():
     meminfo = cp.cuda.runtime.memGetInfo()
@@ -25,12 +26,8 @@ def annotate_peak(args):
     plt.annotate(f'n={harmonic}', (peak / 1e6, value), xytext=(5, 5), textcoords='offset points')
 
 def detect_peaks_gpu(fft_chunk_gpu):
-    if isinstance(fft_chunk_gpu, np.ndarray):
-        threshold = np.percentile(fft_chunk_gpu, 95)
-        peak_indices = np.where(fft_chunk_gpu > threshold)[0]
-    else:
-        threshold = cp.percentile(fft_chunk_gpu, 95)
-        peak_indices = cp.where(fft_chunk_gpu > threshold)[0]
+    threshold = cp.percentile(cp.abs(fft_chunk_gpu), 95)
+    peak_indices = cp.where(cp.abs(fft_chunk_gpu) > threshold)[0]
     return peak_indices
 
 def process_chunk(chunk_data, expected_frequencies_gpu):
@@ -54,11 +51,8 @@ def process_chunk(chunk_data, expected_frequencies_gpu):
 
     peak_freqs = freq_chunk_gpu[peak_indices]
     
-    if isinstance(peak_freqs, cp.ndarray):
-        detected_peaks = cp.array([peak for peak in peak_freqs if cp.isin(peak, expected_frequencies_gpu)])
-        detected_peaks = detected_peaks.get()
-    else:
-        detected_peaks = np.array([peak for peak in peak_freqs if peak in expected_frequencies_gpu])
+    detected_peaks = cp.array([peak for peak in peak_freqs if cp.isin(peak, expected_frequencies_gpu)])
+    detected_peaks = detected_peaks.get()
     
     if detected_peaks.size == 0:
         logging.debug("No detected peaks match expected frequencies")
@@ -97,6 +91,12 @@ def calculate_harmonic_numbers_gpu(detected_peaks, gyrofrequency):
 def plot_chunk(chunk_peaks, chunk_values):
     plt.scatter(np.array(chunk_peaks) / 1e6, chunk_values, color='red')
 
+@jit.rawkernel()
+def process_fft_kernel(fft_values, output):
+    i = jit.grid(1)
+    if i < output.size:
+        output[i] = cp.abs(fft_values[i])
+
 def identify_gyrosynchrotron_emission(freq, fft_values, magnetic_field_strength, output_dir, date_str, time_str):
     logging.info(f"Starting gyrosynchrotron emission identification for {date_str} {time_str}")
    
@@ -116,7 +116,7 @@ def identify_gyrosynchrotron_emission(freq, fft_values, magnetic_field_strength,
 
     chunk_size = 1000000  # Adjust based on available memory
     chunk_data = [(freq[i:i+chunk_size], fft_values[i:i+chunk_size]) for i in range(0, len(freq), chunk_size)]
-    
+   
     with mp.get_context("spawn").Pool(processes=os.cpu_count()) as pool:
         chunk_results = pool.starmap(process_chunk, [(chunk, expected_frequencies_gpu) for chunk in chunk_data])
         for chunk_peaks in chunk_results:
@@ -126,21 +126,26 @@ def identify_gyrosynchrotron_emission(freq, fft_values, magnetic_field_strength,
 
     if len(detected_peaks) == 0:
         logging.warning("No peaks detected, skipping harmonic number calculation.")
-        harmonic_numbers = np.array([])
-        # Add this condition
         logging.info("No peaks detected, skipping plotting.")
-        return  # or plt.close() if you want to create an empty plot
-    else:
-        detected_peaks = np.array(detected_peaks)
-        harmonic_numbers = calculate_harmonic_numbers_gpu(detected_peaks, gyrofrequency)
+        return
 
-    # Continue with the rest of the plotting code
+    detected_peaks = np.array(detected_peaks)
+    harmonic_numbers = calculate_harmonic_numbers_gpu(detected_peaks, gyrofrequency)
+
     plt.figure(figsize=(14, 7))
     for freq_chunk, fft_chunk in chunk_data:
-        plt.plot(freq_chunk / 1e6, fft_chunk, label='FFT Magnitude Spectrum', color='black')
+        fft_magnitude = np.abs(fft_chunk)
+        fft_magnitude_gpu = cp.array(fft_magnitude, dtype=cp.float32)  # Use float32 instead of float64
+        output_gpu = cp.zeros_like(fft_magnitude_gpu)
+        
+        threads_per_block = 256
+        blocks_per_grid = (fft_magnitude_gpu.size + threads_per_block - 1) // threads_per_block
+        
+        process_fft_kernel((blocks_per_grid,), (threads_per_block,), (fft_magnitude_gpu, output_gpu))
+        plt.plot(freq_chunk / 1e6, output_gpu.get(), label='FFT Magnitude Spectrum', color='black')
 
     valid_peaks = [peak for peak in detected_peaks if peak in freq]
-    valid_peak_values = [fft_values[np.where(freq == peak)[0][0]] for peak in valid_peaks]
+    valid_peak_values = [np.abs(fft_values[np.where(freq == peak)[0][0]]) for peak in valid_peaks]
 
     chunk_size = 1024
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:

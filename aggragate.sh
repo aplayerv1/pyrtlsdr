@@ -10,7 +10,7 @@ cd /home/server/rtl/pyrtl
 timestamp=$(date +"%Y%m%d_%H%M%S")
 
 # Create a timestamped directory
-output_dir="/mnt/disk2T/rtl/combined"
+output_dir="./combined"
 mkdir -p "$output_dir"
 
 # # Aggregate data

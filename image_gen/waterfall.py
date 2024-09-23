@@ -20,6 +20,16 @@ def save_waterfall_image(freq, fft_values, output_dir, date_str, time_str, durat
         # Preprocess FFT values
         preprocessed_fft_values = preprocess_fft_values(fft_values)
 
+        # Separate positive and negative values
+        positive_mask = preprocessed_fft_values > 0
+        negative_mask = preprocessed_fft_values < 0
+        
+        # Apply logarithmic scaling to positive values
+        preprocessed_fft_values[positive_mask] = np.log10(preprocessed_fft_values[positive_mask] + 1)
+        
+        # Apply logarithmic scaling to negative values, keeping them negative
+        preprocessed_fft_values[negative_mask] = -np.log10(-preprocessed_fft_values[negative_mask] + 1)
+
         sorted_indices = np.argsort(freq)
         freq = freq[sorted_indices]
         preprocessed_fft_values = preprocessed_fft_values[sorted_indices]
@@ -49,10 +59,9 @@ def save_waterfall_image(freq, fft_values, output_dir, date_str, time_str, durat
         freq_axis = freq[:num_frequencies] / 1e6  # Convert to MHz
 
         plt.figure(figsize=(12, 8))
-        plt.pcolormesh(time_axis, freq_axis, power_db.T, shading='auto', cmap='viridis')
+        plt.pcolormesh(time_axis, freq_axis, power_db.T, shading='auto', cmap='coolwarm')
         plt.colorbar(label='Power (dB)')
 
-        # plt.ylim(low_cutoff/1e6, high_cutoff/1e6)
         plt.ylim(freq_axis.min(), freq_axis.max())
         
         valid_peaks = [int(p) for p in peaks if 0 <= p < len(freq_axis)]
@@ -77,4 +86,3 @@ def save_waterfall_image(freq, fft_values, output_dir, date_str, time_str, durat
         logging.info(f"Waterfall display saved successfully: {image_filename}")
     except Exception as e:
         logging.error(f"An error occurred while saving waterfall image: {e}")
-        logging.exception("Traceback:")

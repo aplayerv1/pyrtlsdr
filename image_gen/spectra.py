@@ -31,7 +31,9 @@ def save_spectra(freq, fft_values, peaks, troughs, output_dir, date, time, cente
     with tqdm(total=1, desc='Generating Spectra:') as pbar:
         try:
             os.makedirs(output_dir, exist_ok=True)
-            
+            min_length = min(len(freq), len(fft_values))
+            freq = freq[:min_length]
+            fft_values = fft_values[:min_length]
             # Create memory-mapped array for FFT values
             temp_file = tempfile.NamedTemporaryFile(delete=False)
             mmap_fft = np.memmap(temp_file.name, dtype='float32', mode='w+', shape=fft_values.shape)
@@ -84,7 +86,9 @@ def save_enhanced_spectra(freq, fft_values, peaks, troughs, output_dir, date, ti
     with tqdm(total=1, desc='Generating Enhanced Spectra:') as pbar:
         try:
             os.makedirs(output_dir, exist_ok=True)
-            
+            min_length = min(len(freq), len(fft_values))
+            freq = freq[:min_length]
+            fft_values = fft_values[:min_length]
             # Create memory-mapped array for FFT values
             temp_file = tempfile.NamedTemporaryFile(delete=False)
             mmap_fft = np.memmap(temp_file.name, dtype='float32', mode='w+', shape=fft_values.shape)

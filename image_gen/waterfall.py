@@ -16,7 +16,9 @@ def save_waterfall_image(freq, fft_values, output_dir, date_str, time_str, durat
     try:
         logging.debug(f"Initial frequency range: {freq.min()} to {freq.max()} Hz")
         logging.debug(f"Initial FFT values range: {fft_values.min()} to {fft_values.max()}")
-
+        logging.debug(f"Duration hours before: {duration_hours}")
+        duration_hours = duration_hours / 60
+        logging.debug(f"Duration hours after: {duration_hours}")
         # Preprocess FFT values
         preprocessed_fft_values = preprocess_fft_values(fft_values)
 
@@ -75,8 +77,8 @@ def save_waterfall_image(freq, fft_values, output_dir, date_str, time_str, durat
         for trough in valid_troughs:
             plt.axhline(y=freq_axis[trough], color='b', linestyle='--', alpha=0.5)
 
-        plt.title(f'Waterfall Display \n{date_str} {time_str} (Duration: {duration_hours:.2f} hours)')
-        plt.xlabel('Time (hours)')
+        plt.title(f'Waterfall Display \n{date_str} {time_str} (Duration: {duration_hours:.2f} minutes)')
+        plt.xlabel('Time (minutes)')
         plt.ylabel('Frequency (MHz)')
         plt.tight_layout()
 

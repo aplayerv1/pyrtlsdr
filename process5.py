@@ -218,7 +218,6 @@ def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon
 
     filtered_fft_values = advanced_signal_processing_pipeline(filtered_freq, filtered_fft_values, fs, center_frequency, initial_bandwidth, EARTH_ROTATION_RATE)
     logging.debug(f"Filtered frequency range After Compute Bandwidth: {filtered_freq.min()} to {filtered_freq.max()} Hz")
-    # fft_nottime = perform_gpu_fft(filtered_fft_values)
     logging.debug("After No time")
     logging.debug(f"Filtered frequency range After Compute Bandwidth: {filtered_freq.min()} to {filtered_freq.max()} Hz")
     
@@ -236,7 +235,7 @@ def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon
             generate_lofar_image(filtered_fft_values,filtered_fft_values, filtered_freq, output_dir, date, time, lat, lon, duration)
             
     save_waterfall_image(filtered_freq, filtered_fft_values, output_dir, date, time, duration, center_frequency, initial_bandwidth, peaks, troughs, low_cutoff, high_cutoff)
-    
+
     create_intensity_map(filtered_freq, filtered_fft_values, fs, output_dir, date, time, temperature=2.7)
     save_spectrogram_and_signal_strength(filtered_freq, filtered_fft_values, fs, output_dir, date, time, lat, lon, duration)
     calculate_and_save_psd(filtered_freq, filtered_fft_values, fs, output_dir, date, time, center_frequency, initial_bandwidth, low_cutoff, high_cutoff)
@@ -258,39 +257,33 @@ def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon
 def find_emission_absorption_lines(filtered_freq, filtered_fft_values, low_cutoff, high_cutoff):
     logging.debug(f"Input shapes: filtered_freq: {filtered_freq.shape}, filtered_fft_values: {filtered_fft_values.shape}")
 
-    # Separate real and imaginary parts
-    real_part = np.real(filtered_fft_values)
-    imag_part = np.imag(filtered_fft_values)
+    # Calculate power spectrum
+    power_spectrum = np.abs(filtered_fft_values)**2
 
-    logging.debug(f"Real part shape: {real_part.shape}, Imag part shape: {imag_part.shape}")
+    logging.debug(f"Power spectrum shape: {power_spectrum.shape}")
 
-    # Apply median filter to real and imaginary parts separately
-    smoothed_real = medfilt(real_part, kernel_size=5)
-    smoothed_imag = medfilt(imag_part, kernel_size=5)
+    # Apply median filter for smoothing
+    smoothed_power = medfilt(power_spectrum, kernel_size=5)
 
-    logging.debug(f"Smoothed real shape: {smoothed_real.shape}, Smoothed imag shape: {smoothed_imag.shape}")
+    logging.debug(f"Smoothed power spectrum shape: {smoothed_power.shape}")
 
-    # Recombine the smoothed parts
-    smoothed_fft = smoothed_real + 1j * smoothed_imag
-
-    # Calculate magnitude of the smoothed FFT
-    magnitude_fft = np.abs(smoothed_fft)
-
-    logging.debug(f"Magnitude FFT shape: {magnitude_fft.shape}")
-
-    mean_fft = np.mean(magnitude_fft)
-    std_fft = np.std(magnitude_fft)
-    threshold = mean_fft + 2 * std_fft
+    # Calculate threshold for peak detection
+    mean_power = np.mean(smoothed_power)
+    std_power = np.std(smoothed_power)
+    threshold = mean_power + 2 * std_power
 
     logging.debug(f"Threshold: {threshold}")
 
     try:
-        peak_indices, _ = find_peaks(magnitude_fft, height=threshold, distance=20)
+        # Find peaks (emission lines)
+        peak_indices, _ = find_peaks(smoothed_power, height=threshold, distance=20)
         peaks = filtered_freq[peak_indices]
 
-        trough_indices, _ = find_peaks(-magnitude_fft, height=-threshold, distance=20)
+        # Find troughs (absorption lines)
+        trough_indices, _ = find_peaks(-smoothed_power, height=-threshold, distance=20)
         troughs = filtered_freq[trough_indices]
 
+        # Remove any zero-frequency peaks
         peaks = peaks[peaks != 0]
 
         logging.debug(f"Number of peaks found: {len(peaks)}")

@@ -6,19 +6,6 @@ from scipy import signal
 from tqdm import tqdm
 import concurrent.futures
 
-def enhance_fft_values(fft_values):
-    logging.debug(f"Enhancing FFT values. Input shape: {fft_values.shape}")
-    enhanced = np.log10(np.abs(fft_values) + 1)
-    logging.debug(f"Enhanced FFT values. Output shape: {enhanced.shape}")
-    return enhanced
-
-def preprocess_fft_values(fft_values, kernel_size=3):
-    logging.debug(f"Preprocessing FFT values. Input shape: {fft_values.shape}")
-    denoised_fft_values = signal.medfilt(np.abs(fft_values), kernel_size=kernel_size)
-    preprocessed = enhance_fft_values(denoised_fft_values)
-    logging.debug(f"Preprocessed FFT values. Output shape: {preprocessed.shape}")
-    return preprocessed
-
 def calculate_and_save_psd(freq, fft_values, sampling_rate, output_dir, date, time, center_frequency, bandwidth, low_cutoff, high_cutoff):
     logging.info(f"Starting PSD calculation for {date} {time}")
     try:
@@ -34,9 +21,6 @@ def calculate_and_save_psd(freq, fft_values, sampling_rate, output_dir, date, ti
         
         logging.debug(f"Adjusted lengths - freq: {len(freq)}, fft_values: {len(fft_values)}")
         
-        # Apply preprocessing to FFT values
-        preprocessed_fft_values = preprocess_fft_values(fft_values)
-        
         def process_segment(segment):
             try:
                 f, psd_segment = signal.welch(segment, fs=sampling_rate, nperseg=1024, scaling='density')
@@ -47,8 +31,8 @@ def calculate_and_save_psd(freq, fft_values, sampling_rate, output_dir, date, ti
                 return None, None
 
         # Determine chunk size for parallel processing
-        chunk_size = min(len(preprocessed_fft_values) // os.cpu_count(), 1024)
-        chunks = [preprocessed_fft_values[i:i + chunk_size] for i in range(0, len(preprocessed_fft_values), chunk_size)]
+        chunk_size = min(len(fft_values) // os.cpu_count(), 1024)
+        chunks = [fft_values[i:i + chunk_size] for i in range(0, len(fft_values), chunk_size)]
         
         logging.info(f"Processing {len(chunks)} chunks in parallel")
         

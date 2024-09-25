@@ -10,6 +10,7 @@ import psutil
 from astropy.io import fits
 import scipy.signal
 import datetime
+from scipy import signal
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -17,14 +18,19 @@ logger = logging.getLogger(__name__)
 
 # GPU Configuration
 logger.info("Configuring GPU")
-physical_devices = tf.config.list_physical_devices('GPU')
-logger.info(f"Number of GPUs available: {len(physical_devices)}")
-if len(physical_devices) > 0:
-    logger.info(f"Enabling memory growth on GPU: {physical_devices[0]}")
-    tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        logger.info(f"GPU memory growth enabled for {len(gpus)} GPU(s)")
+    except RuntimeError as e:
+        logger.error(f"Error configuring GPU: {e}")
+else:
+    logger.info("No GPU devices found. Running on CPU.")
 # Constants
-fs = 2.4e6  # Sampling frequency in Hz
+fs = 20.0e6  # Sampling frequency in Hz
 notch_freq = 9750  # Low band LO frequency in MHz
 notch_width = 30  # Notch width in MHz
 lnb_offset = 9750e6
@@ -61,10 +67,37 @@ def tf_remove_lnb_effect(signal, fs, notch_freq, notch_width):
     return tf.math.real(filtered_signal[:tf.shape(signal)[0]])
 
 @tf.function
-def tf_bandpass_filter(signal, low_cutoff, high_cutoff):
-    logger.debug(f"Applying bandpass filter: {low_cutoff} - {high_cutoff}")
-    b, a = tf.signal.butter(4, [low_cutoff, high_cutoff], btype='bandpass')
-    return tf.signal.filter(signal, b, a)
+def tf_bandpass_filter(input_signal, low_cutoff, high_cutoff):
+    def butter_bandpass(lowcut, highcut, fs, order=5):
+        nyq = 0.5 * fs
+        low = lowcut / nyq
+        high = highcut / nyq
+        b, a = signal.butter(order, [low, high], btype='band')
+        return b, a
+
+    b, a = tf.py_function(butter_bandpass, [low_cutoff, high_cutoff, fs], [tf.float32, tf.float32])
+    
+    # Reshape input signal
+    input_signal = tf.expand_dims(tf.expand_dims(tf.expand_dims(input_signal, axis=0), axis=2), axis=-1)
+    
+    # Reshape filter
+    b = tf.reshape(b, [1, -1, 1, 1, 1])
+    
+    # Calculate padding
+# Calculate padding
+    pad_width = tf.shape(b)[1] - 1
+    paddings = tf.stack([[0, 0], [pad_width, pad_width], [0, 0], [0, 0], [0, 0]])
+
+    
+    # Pad the signal
+    padded_signal = tf.pad(input_signal, paddings, mode='CONSTANT')
+    
+    # Apply the filter using 3D convolution
+    filtered = tf.nn.conv3d(padded_signal, b, strides=[1,1,1,1,1], padding='SAME')
+
+    
+    return tf.squeeze(filtered)
+
 
 def create_model():
     logger.info("Creating machine learning model")
@@ -93,29 +126,37 @@ def process_samples(samples, fs, lnb_offset, low_cutoff, high_cutoff):
     lnb_offset = tf.cast(lnb_offset, dtype=tf.float32)
 
     # Remove LNB effect
-    notch_freq_normalized = lnb_offset / (0.5 * fs)
+    notch_freq_normalized = tf.clip_by_value(lnb_offset / (0.5 * fs), 1e-6, 1 - 1e-6)
     notch_width = tf.constant(30e6, dtype=tf.float32)  # 30 MHz width
-    notch_width_normalized = notch_width / (0.5 * fs)
+    notch_width_normalized = tf.clip_by_value(notch_width / (0.5 * fs), 1e-6, 1 - 1e-6)
 
     b, a = tf.py_function(lambda x, y: signal.iirnotch(x, y), [notch_freq_normalized, notch_width_normalized], [tf.float32, tf.float32])
-    
+   
     # Apply filter using convolution
     padded_samples = tf.pad(samples, [[tf.shape(b)[0] - 1, 0]])
-    processed_samples = tf.nn.conv1d(tf.expand_dims(padded_samples, axis=1), tf.expand_dims(b, axis=1), stride=1, padding='VALID')
+    padded_samples = tf.expand_dims(tf.expand_dims(padded_samples, axis=0), axis=2)
+    b = tf.expand_dims(tf.expand_dims(b, axis=0), axis=1)
+    processed_samples = tf.nn.conv1d(padded_samples, b, stride=1, padding='VALID')
     processed_samples = tf.squeeze(processed_samples)
 
     # Apply bandpass filter
-    nyq_rate = fs / 2.0
-    low_cutoff = low_cutoff / nyq_rate
-    high_cutoff = high_cutoff / nyq_rate
     processed_samples = tf_bandpass_filter(processed_samples, low_cutoff, high_cutoff)
 
+    # Ensure correct shape for further operations
+    processed_samples = tf.reshape(processed_samples, [-1])  # Flatten to 1D
+
     fft_result = tf.signal.fft(tf.cast(processed_samples, tf.complex64))
-    freqs = tf.signal.fftfreq(tf.shape(processed_samples)[0], 1/fs)
-    peak_freq = freqs[tf.argmax(tf.abs(fft_result))]
+    freqs = tf.range(0, tf.shape(processed_samples)[0], dtype=tf.float32) * (fs / tf.cast(tf.shape(processed_samples)[0], tf.float32))
+    
+    # Ensure correct shape for argmax operation
+    fft_abs = tf.abs(fft_result)
+    fft_abs = tf.reshape(fft_abs, [-1])  # Flatten to 1D
+    peak_freq = tf.gather(freqs, tf.argmax(fft_abs))
 
     logger.debug(f"Peak frequency detected: {peak_freq}")
     return processed_samples, peak_freq
+
+
 
 def generate_wow_signal(n_samples=1024, freq=1420.40e6, drift_rate=10):
     logger.debug(f"Generating 'Wow!' signal: freq={freq}, drift_rate={drift_rate}")
@@ -157,7 +198,14 @@ def train_model():
 
 def predict_signal(model, samples, threshold):
     logger.debug(f"Predicting signal with threshold: {threshold}")
-    reshaped_samples = samples[np.newaxis, :]
+    # Ensure the samples are the correct length
+    samples = tf.convert_to_tensor(samples)
+    if tf.shape(samples)[0] > 1024:
+        samples = samples[:1024]
+    elif tf.shape(samples)[0] < 1024:
+        samples = tf.pad(samples, [[0, 1024 - tf.shape(samples)[0]]])
+    
+    reshaped_samples = tf.reshape(samples, (1, 1024, 1))
     confidence = model.predict(reshaped_samples)
     logger.debug(f"Prediction confidence: {confidence[0][0]}")
     return confidence[0][0] >= threshold
@@ -194,6 +242,11 @@ def set_cpu_affinity(cores):
     p.cpu_affinity(cores)
 
 def main():
+    import h5py
+    import argparse
+    import os
+    import gc
+    
     parser = argparse.ArgumentParser(description='Process a FITS file.')
     parser.add_argument('-f', '--file', type=str, required=True, help='Path to the FITS file')
     parser.add_argument('-c', '--chunk-size', type=int, default=1024, help='Chunk size for reading FITS file')
@@ -216,7 +269,13 @@ def main():
     if os.path.exists(model_weights_file):
         logger.info('Loading pre-trained model weights')
         model = create_model()
-        model.load_weights(model_weights_file)
+        with h5py.File(model_weights_file, 'r') as f:
+            if isinstance(f.attrs['keras_version'], str):
+                keras_version = f.attrs['keras_version']
+            else:
+                keras_version = f.attrs['keras_version'].decode('utf-8')
+            logger.info(f"Keras version of saved model: {keras_version}")
+        model.load_weights(model_weights_file, by_name=True, skip_mismatch=True)
     else:
         logger.info('Training new model')
         model = create_model()

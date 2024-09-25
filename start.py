@@ -108,36 +108,37 @@ def process_and_heatmap(file, sfreq, srf, tol, chunk, duration_hours, lat, lon, 
             "--fs", str(srf), "--num-workers", str(workers), "--nperseg", "2048"
         ], capture_output=True, text=True)
         
-        # logging.info(f"Starting AI process for file: {file}")
-        # ai_result = subprocess.run([
-        #     "python3", "aim.py", "-f", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
-        #     "-c", "1024", "-n", str(workers), "--nperseg", "2048"
-        # ], capture_output=True, text=True)
-        # # Check if the process was successful
+        if process.returncode == 0:
+            logging.info(f"Processing completed successfully for file: {file}")
+            
+            # Check if the frequency is close to 1420MHz (allowing for some tolerance)
+            if abs(sfreq - 1420e6) < 1e6:  # Within 1MHz of 1420MHz
+                logging.info(f"Starting AI process for 1420MHz signal: {file}")
+                ai_result = subprocess.run([
+                    "/home/server/miniconda3/envs/tf_gpu/bin/python3", "aim.py", "-f", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
+                    "-c", "1024", "-n", str(workers), "--nperseg", "2048"
+                ], capture_output=True, text=True)
+                
+                if ai_result.returncode == 0:
+                    logging.info(f"AI process completed successfully for file: {file}")
+                else:
+                    logging.error(f"AI process failed for file: {file}")
+                    logging.error(f"AI error output: {ai_result.stderr}")
+            else:
+                logging.info(f"Skipping AI process for non-1420MHz signal: {file}")
+        else:
+            logging.error(f"Processing failed for file: {file}")
+            logging.error(f"Processing error output: {process.stderr}")
+
 
         logging.info(f"Aggragate Data")
-
-        aggragate_output = subprocess.run([
-            "python3", "aggregate.py", "-i", f"{BASE_DIR}/raw/", "-o", f"{BASE_DIR}/aggregate/"
-        ], check=True)
 
         if process.returncode == 0:
             logging.info(f"Processing completed successfully for file: {file}")
         else:
             logging.error(f"Processing failed for file: {file}")
             logging.error(f"Processing error output: {process.stderr}")
-        
-        if aggragate_output.returncode == 0:
-            logging.info(f"Aggragate Data completed successfully.")
-        else:
-            logging.error(f"Aggragate Data failed.")
-            logging.error(f"Aggragate Data error output: {aggragate_output.stderr}")
-            
-        # if ai_result.returncode == 0:
-        #     logging.info(f"AI process completed successfully for file: {file}")
-        # else:
-        #     logging.error(f"AI process failed for file: {file}")
-        #     logging.error(f"AI error output: {ai_result.stderr}")
+    
         
         if heatmap_result.returncode == 0:
             logging.info(f"Heatmap generated successfully for file: {file}")
@@ -262,7 +263,7 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend, low_cutoff, high_cu
             'srf': calculate_sampling_rate(ffreq, lfreq, DURATION, TOL),
             'tol': TOL,
             'chunk': CHUNK,
-            'duration_hours': DURATION / 3600,
+            'duration_hours': DURATION,
             'lat': LAT,
             'lon': LON,
             'workers': WORKERS,
@@ -273,7 +274,7 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend, low_cutoff, high_cu
         logging.info(f"Added {file} to processed files set")
    
     duration = DURATION
-    duration_hours = duration / 3600
+    duration_hours = duration
 
     srf = calculate_sampling_rate(ffreq, lfreq, DURATION, TOL)
 
@@ -307,7 +308,7 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend, low_cutoff, high_cu
                 'srf': srf,
                 'tol': TOL,
                 'chunk': CHUNK,
-                'duration_hours': duration_hours,
+                'duration_hours': duration,
                 'lat': LAT,
                 'lon': LON,
                 'workers': WORKERS,

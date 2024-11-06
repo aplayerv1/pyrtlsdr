@@ -14,30 +14,6 @@ from matplotlib.colors import LogNorm
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def preprocess_fft_values(fft_values, kernel_size=3):
-    logging.debug("Preprocessing FFT values on GPU")
-    if not isinstance(fft_values, cp.ndarray):
-        logging.error("fft_values is not a cupy array")
-        raise TypeError("fft_values must be a cupy array")
-    
-    logging.debug(f"Original fft_values shape: {fft_values.shape}")
-    
-    if fft_values.ndim == 1:
-        fft_values = fft_values.reshape((1, -1))
-        logging.debug(f"Reshaped fft_values shape: {fft_values.shape}")
-    
-    denoised_fft_values = cp.median(fft_values, axis=0)
-    logging.debug(f"Median computed, result shape: {denoised_fft_values.shape}")
-    
-    if denoised_fft_values.ndim == 0:
-        logging.warning("Denoised FFT values is a scalar")
-        denoised_fft_values = cp.expand_dims(denoised_fft_values, axis=0)
-        logging.debug(f"Expanded denoised shape: {denoised_fft_values.shape}")
-    
-    result = cp.log10(denoised_fft_values + 1)
-    logging.debug(f"Preprocessed result shape: {result.shape}")
-    
-    return result
 
 @jit(nopython=True, parallel=True)
 def compute_intensity(intensity_map):
@@ -108,7 +84,7 @@ def create_intensity_map(filtered_freq, filtered_fft_values, sampling_rate, outp
                 batch = cp.asarray(batch)
             
             logging.debug("Preprocessing FFT values on GPU")
-            preprocessed_batch = preprocess_fft_values(batch)
+            preprocessed_batch = batch
             
             chunk_size = 500  # Reduced from 1000
             num_chunks = (len(preprocessed_batch) + chunk_size - 1) // chunk_size
@@ -138,8 +114,12 @@ def create_intensity_map(filtered_freq, filtered_fft_values, sampling_rate, outp
 
         logging.debug(f"Created intensity map with shape: {intensity_map.shape}")
         
-        peaks = find_peaks(np.ravel(intensity_map))[0]
+        peaks, _ = find_peaks(np.ravel(intensity_map), height=0.02, distance=5)
+        scaled_peaks = np.array([(p % side_length, p // side_length) for p in peaks])
         logging.debug(f"Found {len(peaks)} peaks")
+        amplification_factor = 2  # Change as needed
+        for x, y in scaled_peaks:
+            intensity_map[y, x] *= amplification_factor
         
         logging.debug("Detecting events")
         threshold = np.mean(intensity_map) + 5 * np.std(intensity_map)
@@ -157,7 +137,7 @@ def create_intensity_map(filtered_freq, filtered_fft_values, sampling_rate, outp
         intensity_map = gaussian_filter(intensity_map, sigma=1)
         
         logging.debug("Plotting burst detections")
-        plot_burst_detections(real_bursts, intensity_map, sampling_rate, peaks, side_length, date, time, output_dir)
+        plot_burst_detections(real_bursts, intensity_map, sampling_rate, scaled_peaks, side_length, date, time, output_dir)
         
         logging.info("Intensity map creation completed")
         return intensity_map
@@ -217,31 +197,37 @@ def classify_bursts(clustered_events, features):
 
 def plot_burst_detections(real_bursts, intensity_map, sampling_rate, peaks, side_length, date, time, output_dir):
     plt.figure(figsize=(12, 10))
-    
+
+    # Check for valid intensity map
     if np.all(intensity_map == 0) or intensity_map.size == 0:
         logging.warning("Empty or all-zero intensity map. Skipping plot.")
         plt.close()
         return
-    
+
+    # Calculate intensity map bounds
     vmin, vmax = np.percentile(intensity_map[intensity_map > 0], [1, 99]) if np.any(intensity_map > 0) else (1e-10, 1)
-    
     norm = LogNorm(vmin=max(vmin, 1e-10), vmax=max(vmax, vmin * 1.1)) if vmax / vmin > 10 else plt.Normalize(vmin, vmax)
-    
+
+    # Plot intensity map
     plt.imshow(intensity_map, cmap='viridis', norm=norm,
                extent=(0, side_length, side_length, 0), aspect='auto')
     plt.colorbar(label='Intensity')
-    
-    if len(peaks) > 0:
+
+    # Plot peaks if present
+    if peaks is not None and len(peaks) > 0:
         plt.scatter(peaks % side_length, peaks // side_length, color='red', s=10, label='Peaks')
-    
-    if len(real_bursts) > 0 and real_bursts[0].size > 0 and real_bursts[1].size > 0:
-        plt.scatter(real_bursts[0], real_bursts[1], color='white', s=20, label='Detected Bursts', edgecolors='black')
-    
+
+    # Plot bursts with dimension checking
+    if isinstance(real_bursts, (list, tuple)):
+        if len(real_bursts) >= 2 and isinstance(real_bursts[0], np.ndarray) and isinstance(real_bursts[1], np.ndarray):
+            if real_bursts[0].size > 0 and real_bursts[1].size > 0:
+                plt.scatter(real_bursts[0], real_bursts[1], color='white', s=20, label='Detected Bursts', edgecolors='black')
+
     plt.title(f"Intensity Map with Burst Detections: {date} {time}")
     plt.xlabel('Frequency (Hz)')
     plt.ylabel('Time')
     plt.legend()
-    
+
     output_path = os.path.join(output_dir, f"intensity_map_{date}_{time}.png")
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()

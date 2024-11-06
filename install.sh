@@ -10,15 +10,15 @@ if ! command -v conda &> /dev/null; then
 fi
 
 # Create and activate the tf_gpu environment
-conda create -n tf_gpu python=3.8 -y
+conda create -n tf_gpu python=3.10.15 -y
 conda activate tf_gpu
 
 # Install required packages
 conda install -y numpy matplotlib scipy astropy
 conda install -y -c conda-forge cupy
-conda install -y psutil configparser tensorflow-gpu argparse
+conda install -y psutil configparser tensorflow-gpu=2.18.0 argparse
 conda install -y numba
-conda install -y -c conda-forge pywt
+conda install -y -c conda-forge pywavelet
 conda install -y scikit-learn
 
 # Install additional packages that might not be available through conda

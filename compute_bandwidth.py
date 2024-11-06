@@ -8,15 +8,20 @@ import cupy as cp
 import traceback
 import gc
 
-def process_chunk(chunk, fs, full_data, start_row, n_std=3):
-    if chunk.ndim != 1:
-        raise ValueError("Input chunk must be a 1D array.")
-    # Ensure chunk is a CuPy array
-    chunk_gpu = cp.asarray(chunk)
-    
+def process_chunk(chunk, fs, full_data, start_row, n_std=3, effective_freq=None, effective_low=None, effective_high=None, nyquist_zone=None):
     # Perform GPU-accelerated FFT
+    chunk_gpu = cp.asarray(chunk)
     fft_result = cp.fft.fft(chunk_gpu)
     freq_bins = cp.fft.fftfreq(len(chunk_gpu), d=1/fs)
+    
+    # Adjust frequency bins for bandpass sampling if in higher Nyquist zones
+    if nyquist_zone and nyquist_zone > 1:
+        freq_bins = freq_bins + (nyquist_zone - 1) * fs/2
+        
+    # Apply bandpass filter for the effective frequency range
+    if effective_low is not None and effective_high is not None:
+        freq_mask = (cp.abs(freq_bins) >= effective_low) & (cp.abs(freq_bins) <= effective_high)
+        fft_result = cp.where(freq_mask, fft_result, 0)
     
     # Apply adaptive thresholding to magnitude of FFT result
     magnitude = cp.abs(fft_result)
@@ -25,17 +30,15 @@ def process_chunk(chunk, fs, full_data, start_row, n_std=3):
     # Filter the FFT result
     mask = magnitude > threshold
     filtered_fft = fft_result[mask]
-    filtered_freqs = freq_bins[mask]
     
-    # Transfer results back to CPU and ensure they're NumPy arrays
+    # Transfer results back to CPU and store in full_data
     filtered_fft = cp.asnumpy(filtered_fft)
-    filtered_freqs = cp.asnumpy(filtered_freqs)
-    
     end_row = start_row + len(filtered_fft)
-    full_data[start_row:end_row, 0] = filtered_freqs
-    full_data[start_row:end_row, 1] = filtered_fft
-
+    full_data[start_row:end_row] = filtered_fft
+    
     return len(filtered_fft)
+
+
 
 def adaptive_threshold(fft_values, n_std=3):
     fft_values_gpu = cp.asarray(fft_values)
@@ -79,26 +82,48 @@ def analyze_clusters(freq, fft_values, labels):
         cluster_fft = fft_values[labels == i]
         logging.info(f"Cluster {i}: Avg frequency = {np.mean(cluster_freq):.2f} Hz, Avg magnitude = {np.mean(cluster_fft):.2f}")
 
-def robust_compute_bandwidth(full_data, center_frequency, low_cutoff, high_cutoff):
-    try:
-        return compute_bandwidth_and_cutoffs(full_data, center_frequency, low_cutoff, high_cutoff)
-    except ValueError as ve:
-        logging.error(f"ValueError in compute_bandwidth_and_cutoffs: {ve}")
-        return None, None, None, None, None
-    except MemoryError as me:
-        logging.error(f"MemoryError in compute_bandwidth_and_cutoffs: {me}")
-        # Attempt to free memory and retry with a smaller dataset
-        gc.collect()
-        return compute_bandwidth_and_cutoffs(full_data[:len(full_data)//2], center_frequency, low_cutoff, high_cutoff)
-    except Exception as e:
-        logging.error(f"Unexpected error in compute_bandwidth_and_cutoffs: {e}")
-        logging.debug(traceback.format_exc())
-        return None, None, None, None, None
+def robust_compute_bandwidth(data, center_frequency, low_cutoff, high_cutoff, fs):
+    # Sort frequency range correctly for high frequencies
+    effective_low, effective_high = min(low_cutoff, high_cutoff), max(low_cutoff, high_cutoff)
+    
+    # Calculate FFT with proper scaling for high frequencies
+    fft_values = np.fft.fft(data)
+    freqs = np.fft.fftfreq(len(data), d=1/fs)
+    
+    # Adjust frequency mask for high frequency ranges
+    freq_tolerance = 0.01 * fs  # Add tolerance based on sampling rate
+    mask = (freqs >= effective_low - freq_tolerance) & (freqs <= effective_high + freq_tolerance)
+    
+    # Apply gain for weak signals
+    signal_strength = np.abs(fft_values).mean()
+    if signal_strength < 1e-10:
+        fft_values *= 1e6  # Increased gain for high frequencies
+        
+    filtered_fft = fft_values[mask]
+    filtered_freq = freqs[mask]
+    signal_power = np.abs(filtered_fft)**2
+    
+    logging.debug(f"Frequency range: {freqs.min()} to {freqs.max()} Hz")
+    logging.debug(f"Mask range: {effective_low} to {effective_high} Hz")
+    
+    return effective_high - effective_low, signal_power, mask, filtered_freq, filtered_fft
+
+
 
 def compute_bandwidth_and_cutoffs(full_data, center_frequency, low_cutoff, high_cutoff, min_bandwidth=1000):
-    freq = full_data[:, 0].real  # Extract real part of frequencies
-    fft_values = np.abs(full_data[:, 1])  # Use magnitude of FFT values
+    """Calculates bandwidth and applies cutoffs to frequency and FFT values."""
+    
+    # Compute FFT of time domain signal
+    fft_values = np.fft.fft(full_data)
+    freq = np.fft.fftfreq(len(full_data), d=1/20e6)
 
+    # Convert to 2D array format expected by rest of function
+    full_data = np.column_stack((freq, fft_values))
+    
+    # Continue with existing processing
+    freq = full_data[:, 0].real
+    fft_values = np.abs(full_data[:, 1])
+    
     logging.debug(f"Frequency range: {freq.min()} to {freq.max()} Hz")
     logging.debug(f"FFT values range: {fft_values.min()} to {fft_values.max()}")
 
@@ -110,19 +135,13 @@ def compute_bandwidth_and_cutoffs(full_data, center_frequency, low_cutoff, high_
     logging.debug(f"Number of significant frequencies: {len(significant_freqs)}")
 
     # Determine initial bandwidth if not provided
-    if low_cutoff is None or high_cutoff is None:
-        if len(significant_freqs) < 2:
-            initial_bandwidth = min_bandwidth
-        else:
-            initial_bandwidth = max(abs(significant_freqs[-1] - significant_freqs[0]), min_bandwidth)
-    else:
-        initial_bandwidth = high_cutoff - low_cutoff
+    initial_bandwidth = high_cutoff - low_cutoff
 
     logging.debug(f"Initial bandwidth: {initial_bandwidth} Hz")
 
     # Adjust cutoffs based on initial bandwidth and provided values
-    low_cutoff = max(freq.min(), center_frequency - initial_bandwidth / 2)
-    high_cutoff = min(freq.max(), center_frequency + initial_bandwidth / 2)
+    low_cutoff = center_frequency - initial_bandwidth / 2
+    high_cutoff = center_frequency + initial_bandwidth / 2
     
     # Ensure low_cutoff and high_cutoff are within the actual frequency range
     low_cutoff = max(low_cutoff, freq.min())

@@ -1,13 +1,16 @@
 import os
+import sys
+import re
 import argparse
+import logging
+import datetime
 import numpy as np
 import matplotlib.pyplot as plt
+import multiprocessing as mp
 from scipy.signal import spectrogram, butter, lfilter
 from astropy.io import fits
-import datetime
-import multiprocessing as mp
 from tqdm import tqdm
-import re
+from datetime import datetime  # Changed import
 
 def read_fits_chunk(filename, chunk_size, chunk_idx):
     """Read a specific chunk of data from a FITS file."""
@@ -59,25 +62,36 @@ def process_chunk(args):
     return f, t + start_time, Sxx
 
 def extract_datetime_from_filename(filename):
-    """Extract datetime from the filename in the format data_YYMMDD_HHMMSS or data_YYMMDD_HHMMSS_*.fits."""
+    """Extract datetime from filename with flexible pattern matching."""
     basename = os.path.basename(filename)
-    match = re.search(r'data_(\d{6}_\d{6})', basename)
-    if match:
-        datetime_str = match.group(1)
-        return datetime.datetime.strptime(datetime_str, '%y%m%d_%H%M%S')
-    else:
-        raise ValueError("Filename does not match the expected format 'data_YYMMDD_HHMMSS' or 'data_YYMMDD_HHMMSS_*.fits'")
+    
+    # Multiple patterns to match different filename formats
+    patterns = [
+        r'data_(\d{6}_\d{6})',  # Original format
+        r'(\d{6}_\d{6})',       # Just the date/time
+        r'(\d{8}_\d{6})'        # Full year format
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, basename)
+        if match:
+            datetime_str = match.group(1)
+            try:
+                # Try both 6-digit and 8-digit year formats
+                if len(datetime_str.split('_')[0]) == 6:
+                    return datetime.datetime.strptime(datetime_str, '%y%m%d_%H%M%S')
+                else:
+                    return datetime.datetime.strptime(datetime_str, '%Y%m%d_%H%M%S')
+            except ValueError:
+                continue
+    
+    # If no pattern matches, use current datetime
+    current_time = datetime.datetime.now()
+    logging.warning(f"Using current datetime {current_time} for filename {basename}")
+    return current_time
 
 def main():
-    import sys
-    import os
-    import argparse
-    import multiprocessing as mp
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from astropy.io import fits
-    from tqdm import tqdm
-    from datetime import datetime
+
 
     parser = argparse.ArgumentParser(description='Generate a spectrogram from a FITS file.')
     parser.add_argument('-i', '--input', type=str, required=True, help='Input FITS file')

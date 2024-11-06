@@ -61,22 +61,29 @@ def detect_transients(time_domain_data, threshold=3):
     logging.debug(f"Detected {len(transients)} transient events")
     return transients
 
-def generate_spectrogram(time_domain_data, times, output_dir, date, time):
+def generate_spectrogram(time_domain_data, times, output_dir, date, time, duration_seconds):
     logging.debug("Generating spectrogram")
     plt.figure(figsize=(10, 6))
-   
+    time = time.replace(":","")
     unix_times = times.unix
     logging.debug(f"Unix times: {unix_times[:5]}... (first 5)")
    
-    f, t, Sxx = signal.spectrogram(time_domain_data, fs=1.0/np.mean(np.diff(unix_times)))
+    total_duration_minutes = duration_seconds / 60  # Convert to minutes
+    
+    # Calculate the sampling frequency
+    fs = len(time_domain_data) / duration_seconds
+    
+    f, t, Sxx = signal.spectrogram(time_domain_data, fs=fs)
     logging.debug(f"Spectrogram shape: f={f.shape}, t={t.shape}, Sxx={Sxx.shape}")
     
     plt.pcolormesh(t, f, 10 * np.log10(Sxx), shading='gouraud')
     plt.ylabel('Frequency [Hz]')
-    plt.xlabel('Time [sec]')
+    plt.xlabel('Time [min]')
     plt.title(f'Spectrogram - {date} {time}')
     plt.colorbar(label='Power/Frequency [dB/Hz]')
-    spectrogram_file = os.path.join(output_dir, f'spectrogram_{date}_{time}.png')
+    plt.xlim(0, total_duration_minutes)  # Set x-axis limit to total duration in minutes
+    plt.xticks(np.linspace(0, total_duration_minutes, 6))  # Set 6 evenly spaced ticks
+    spectrogram_file = os.path.join(output_dir, f'lofar_spectrogram_{date}_{time}.png')
     plt.savefig(spectrogram_file)
     plt.close()
     logging.info(f"Spectrogram saved to: {spectrogram_file}")
@@ -109,8 +116,10 @@ def generate_lofar_image(filtered_fft_values, time_domain_data, freq, output_dir
         os.makedirs(output_dir, exist_ok=True)
         try:
             date_obj = parse_date(date)
+            time = time.replace(':', '')
             logging.debug(f'Parsed date: {date_obj}')
             start_datetime = datetime.combine(date_obj.date(), datetime.strptime(time, '%H%M%S').time())
+
             logging.debug(f'start_datetime: {start_datetime}')
             start_time = Time(start_datetime.strftime('%Y-%m-%dT%H:%M:%S'), format='isot')
             logging.debug(f'start_time: {start_time}')
@@ -154,7 +163,7 @@ def generate_lofar_image(filtered_fft_values, time_domain_data, freq, output_dir
             logging.debug('Finished processing chunks. Starting analysis.')
 
             transient_events = detect_transients(time_domain_data)
-            generate_spectrogram(time_domain_data, times, output_dir, date, time)
+            generate_spectrogram(time_domain_data, times, output_dir, date, time,duration_hours)
 
             logging.debug('Starting image generation.')
 
@@ -198,7 +207,7 @@ def generate_lofar_image(filtered_fft_values, time_domain_data, freq, output_dir
             plt.xlabel('Right Ascension (degrees)')
             plt.ylabel('Declination (degrees)')
             plt.title(f'LOFAR Fixed Pointing Observation\n'
-                      f'Date: {date}, Time: {time}, Duration: {duration_hours:.2f} hours\n'
+                      f'Date: {date}, Time: {time}, Duration: {duration_hours:.2f} seconds\n'
                       f'Latitude: {lat:.2f}°')
 
             plt.ylim(dec_min_zoomed, dec_max_zoomed)

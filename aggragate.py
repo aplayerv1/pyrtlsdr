@@ -6,10 +6,8 @@ from astropy.io import fits
 from datetime import datetime, timedelta
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-DURATION_PER_FILE = 1200  # 20 minutes
 
 def extract_time_from_filename(filename):
     pattern = r'data_\d{8}_(\d{6})\.fits'
@@ -89,10 +87,21 @@ def main():
     parser = argparse.ArgumentParser(description="Aggregate FITS data files.")
     parser.add_argument("--data_directory", "-i", type=str, required=True, help="Path to the directory containing FITS data files.")
     parser.add_argument("--output_directory", "-o", type=str, default=".", help="Path to the directory for saving the aggregated data. Default is the current directory.")
+    parser.add_argument("--log_file", "-l", type=str, default="aggregate.log", help="Path to the log file. Default is 'aggregate.log'.")
+    parser.add_argument("--duration", "-d", type=int, default=1200, help="Duration of each file in seconds. Default is 1200 seconds (20 minutes).")
+   
     args = parser.parse_args()
 
     data_directory = args.data_directory
     output_directory = args.output_directory
+    global DURATION_PER_FILE
+    DURATION_PER_FILE = args.duration
+
+    # Set up file logging
+    file_handler = logging.FileHandler(args.log_file)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(file_handler)
 
     if not os.path.isdir(data_directory):
         logger.error(f"The provided data directory does not exist or is not a directory: {data_directory}")
@@ -103,6 +112,3 @@ def main():
         os.makedirs(output_directory)
 
     aggregate_data(data_directory, output_directory)
-
-if __name__ == "__main__":
-    main()

@@ -14,80 +14,58 @@ import tempfile
 import os
 import numpy as np
 
-def create_spectrogram(freq, fft_values, fs, chunk_size=1000, max_workers=4):
-    logging.info(f"Starting spectrogram creation with {len(freq)} frequency points and {fs} Hz sampling rate")
-
-    freq = np.array(freq)
-    duration = len(fft_values) / fs
-    times = np.linspace(0, duration, len(fft_values))
-
-    total_size = len(freq) * len(times) * 4  # 4 bytes for float32
-    if total_size > 2**31 - 1:  # Max file size for 32-bit systems
-        logging.warning("Spectrogram size exceeds maximum file size. Reducing resolution.")
-        downscale_factor = int(np.ceil(np.sqrt(total_size / (2**31 - 1))))
-        freq = freq[::downscale_factor]
-        times = times[::downscale_factor]
-
-    spectrogram_path = os.path.join(tempfile.gettempdir(), 'spectrogram.dat')
-    spectrogram = np.memmap(spectrogram_path, dtype='float32', mode='w+', shape=(len(freq), len(times)))
-
-    logging.info(f"Created memory-mapped array for spectrogram at {spectrogram_path}")
-
-    total_chunks = len(fft_values) // chunk_size + (1 if len(fft_values) % chunk_size else 0)
+def spectrogram_plot(frequency, fft_values, sampling_rate, png_location, date, time, lat, lon, duration_hours, lowcutoff, highcutoff):
+    logging.info(f"Starting spectrogram plot generation for {date} {time}")
     
-    def process_chunk(chunk_index):
-        start = chunk_index * chunk_size
-        end = min(start + chunk_size, len(fft_values))
-        chunk = fft_values[start:end]
-        chunk_spectrogram = np.abs(chunk.reshape(-1, 1))
-        chunk_spectrogram_db = 10 * np.log10(chunk_spectrogram + 1e-10)
-        spectrogram[:, start:end] = chunk_spectrogram_db
-        logging.debug(f"Processed chunk {chunk_index + 1} of {total_chunks}")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_chunk, i) for i in range(total_chunks)]
-        concurrent.futures.wait(futures)
-
-    logging.info(f"Spectrogram creation completed. Shape: {spectrogram.shape}")
-    return spectrogram, freq, times
-
-def spectrogram_plot(frequency, fft_values, sampling_rate, png_location, date, time, lat, lon, duration_hours):
-    logging.info(f"Starting basic spectrogram plot generation for {date} {time}")
-    
-    with tqdm(total=1, desc='Generating Basic Spectrogram:') as pbar:
+    with tqdm(total=1, desc='Generating Spectrogram:') as pbar:
         try:
-            # Ensure fft_values is a numpy array
             fft_values = np.asarray(fft_values)
             
             if fft_values.ndim != 1:
                 logging.error("fft_values should be a 1D array for this function")
                 raise ValueError("fft_values should be a 1D array")
 
-            # Create basic spectrogram
+            # Inside spectrogram_plot function
+            min_length = min(len(frequency), len(fft_values))
+            mask = (frequency[:min_length] >= lowcutoff) & (frequency[:min_length] <= highcutoff)
+            filtered_frequency = frequency[:min_length][mask]
+            filtered_fft_values = fft_values[:min_length][mask]
+
+
+            print(f"Filtered frequency length: {len(filtered_frequency)}")
+            print(f"Filtered fft_values length: {len(filtered_fft_values)}")
+            print(f"Lowcutoff: {lowcutoff}, Highcutoff: {highcutoff}")
+            print(f"Frequency range: {np.min(frequency)} to {np.max(frequency)}")
+           
+            n_fft = 1024  # or another appropriate value
+            freq_range = np.linspace(lowcutoff, highcutoff, n_fft)
+
             plt.figure(figsize=(12, 8))
-            plt.specgram(fft_values, Fs=sampling_rate, scale='linear', cmap='viridis')
+            plt.specgram(filtered_fft_values, NFFT=n_fft, Fs=sampling_rate, Fc=np.mean([lowcutoff, highcutoff]), noverlap=512, cmap='viridis')
 
             plt.colorbar(label='Power')
-            plt.xlabel('Time (s)')
+            plt.xlabel('Time (Minutes)')
             plt.ylabel('Frequency (Hz)')
-            plt.title(f'Basic Spectrogram {date} {time}\nLat: {lat}, Lon: {lon}')
+            plt.ylim(lowcutoff, highcutoff)
+            plt.xlim(0, duration_hours/60)
+            plt.title(f'Spectrogram {date} {time}\nLat: {lat}, Lon: {lon}\nFrequency Range: {lowcutoff/1e6:.2f} MHz - {highcutoff/1e6:.2f} MHz')
 
-            # Save the plot to a file
-            spectrogram_filename = f'basic_spectrogram_{date}_{time}.png'
+            spectrogram_filename = f'spectrogram_{date}_{time}.png'
             spectrogram_path = os.path.join(png_location, spectrogram_filename)
             plt.savefig(spectrogram_path, dpi=300, format='png', bbox_inches='tight')
             
             if os.path.exists(spectrogram_path) and os.path.getsize(spectrogram_path) > 0:
-                logging.info(f"Basic spectrogram saved successfully to: {spectrogram_path}")
+                logging.info(f"Spectrogram saved successfully to: {spectrogram_path}")
             else:
-                logging.error(f"Failed to save basic spectrogram or file is empty: {spectrogram_path}")
+                logging.error(f"Failed to save spectrogram or file is empty: {spectrogram_path}")
 
             plt.close()
             pbar.update(1)
-            logging.info(f"Basic spectrogram generation completed for {date} {time}")
+            logging.info(f"Spectrogram generation completed for {date} {time}")
 
         except Exception as e:
-            logging.error(f"Error in basic spectrogram plot generation: {e}")
+            logging.error(f"Error in spectrogram plot generation: {e}")
+
 
 def analyze_signal_strength(freq, fft_values, output_dir, date, time):
     magnitude = np.abs(fft_values)

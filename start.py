@@ -10,10 +10,15 @@ import configparser
 import re
 import threading
 import csv
+import psutil
+from check_file import check_file
+from astropy.io import fits
+
 # Set up logging
 
 logging.basicConfig(filename='radio_astronomy.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
+process_semaphore = threading.Semaphore(1)
 
 file_queue = queue.Queue()
 range_queue = queue.Queue()
@@ -62,12 +67,13 @@ def calculate_sampling_rate(ffreq, lfreq, duration, tolerance):
     srf = max(min_sampling_rate, 2 * bandwidth + tolerance)
     return srf
 
-def extract_frequency_from_filename(filename):
-    # Example: file name might be "data_20240815_1420MHz_HI.fits"
-    match = re.search(r'(\d+(\.\d+)?)MHz', filename)
-    if match:
-        return float(match.group(1)) * 1e6  # Convert MHz to Hz
-    return None
+def extract_info_from_fits(file_path):
+    with fits.open(file_path) as hdul:
+        header = hdul[0].header
+        frequency = header.get('FREQ', None)
+        date_obs = header.get('DATE', None)
+        time_obs = header.get('TIME', None)
+    return frequency, date_obs, time_obs
 
 def run_range(ffreq, lfreq, srf, duration, ip, port, max_attempts=3, retry_delay=10):
     for attempt in range(max_attempts):
@@ -89,6 +95,7 @@ def run_range(ffreq, lfreq, srf, duration, ip, port, max_attempts=3, retry_delay
                 logging.error(f"Max attempts reached. Range process {ffreq} to {lfreq} failed.")
 
 def process_and_heatmap(file, sfreq, srf, tol, chunk, duration_hours, lat, lon, workers, low_cutoff, high_cutoff):
+  with process_semaphore:
     try:
         logging.info(f"Processing file: {file}")
         logging.info(f"Current frequency range: {low_cutoff/1e6:.2f} MHz to {high_cutoff/1e6:.2f} MHz")
@@ -112,20 +119,20 @@ def process_and_heatmap(file, sfreq, srf, tol, chunk, duration_hours, lat, lon, 
             logging.info(f"Processing completed successfully for file: {file}")
             
             # Check if the frequency is close to 1420MHz (allowing for some tolerance)
-            if abs(sfreq - 1420e6) < 1e6:  # Within 1MHz of 1420MHz
-                logging.info(f"Starting AI process for 1420MHz signal: {file}")
-                ai_result = subprocess.run([
-                    "/home/server/miniconda3/envs/tf_gpu/bin/python3", "aim.py", "-f", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
-                    "-c", "1024", "-n", str(workers), "--nperseg", "2048"
-                ], capture_output=True, text=True)
+            # if abs(sfreq - 1420e6) < 1e6:  # Within 1MHz of 1420MHz
+            #     logging.info(f"Starting AI process for 1420MHz signal: {file}")
+            #     ai_result = subprocess.run([
+            #         "/home/server/miniconda3/envs/tf_gpu/bin/python3", "aim.py", "-f", f"{BASE_DIR}/raw/{file}", "-o", f"{BASE_DIR}/images/{filename_w}/",
+            #         "-c", "1024", "-n", str(workers), "--nperseg", "2048"
+            #     ], capture_output=True, text=True)
                 
-                if ai_result.returncode == 0:
-                    logging.info(f"AI process completed successfully for file: {file}")
-                else:
-                    logging.error(f"AI process failed for file: {file}")
-                    logging.error(f"AI error output: {ai_result.stderr}")
-            else:
-                logging.info(f"Skipping AI process for non-1420MHz signal: {file}")
+            #     if ai_result.returncode == 0:
+            #         logging.info(f"AI process completed successfully for file: {file}")
+            #     else:
+            #         logging.error(f"AI process failed for file: {file}")
+            #         logging.error(f"AI error output: {ai_result.stderr}")
+            # else:
+            #     logging.info(f"Skipping AI process for non-1420MHz signal: {file}")
         else:
             logging.error(f"Processing failed for file: {file}")
             logging.error(f"Processing error output: {process.stderr}")
@@ -241,18 +248,14 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend, low_cutoff, high_cu
    
     unprocessed_files = []
     for file in raw_files:
-        logging.debug(f"Checking file: {file}")
-        if file not in processed_files:
-            file_freq = extract_frequency_from_filename(file)
-            logging.debug(f"File: {file}, Extracted frequency: {file_freq}")
-            if file_freq and ffreq <= file_freq <= lfreq:
-                unprocessed_files.append(file)
-                logging.info(f"Added {file} to unprocessed files list")
-            else:
-                logging.debug(f"File {file} frequency {file_freq} not in range {ffreq} to {lfreq}")
+        file_path = os.path.join(f"{BASE_DIR}/raw", file)
+        frequency, date_obs, time_obs = extract_info_from_fits(file_path)
+        if frequency and date_obs and time_obs and ffreq <= frequency <= lfreq:
+            new_file_path = rename_file_based_on_info(file_path, frequency, date_obs, time_obs)
+            unprocessed_files.append(os.path.basename(new_file_path))
         else:
-            logging.debug(f"File {file} already processed")
-   
+            logging.debug(f"File {file} frequency {frequency} not in range {ffreq} to {lfreq}")
+
     logging.info(f"Found {len(unprocessed_files)} unprocessed files: {unprocessed_files}")
    
     for file in unprocessed_files:
@@ -371,12 +374,24 @@ def read_frequency_ranges(file_path='frequency_ranges.csv'):
             ))
     return frequency_ranges
 
+def rename_file_based_on_info(file_path, frequency, date_obs, time_obs):
+    for start, end, center, name, low_cutoff, high_cutoff in frequency_ranges:
+        if start <= frequency <= end:
+            date_time = f"{date_obs}T{time_obs}"
+            # Changed %y to %Y for 4-digit year format
+            date_str = datetime.strptime(date_time, '%Y-%m-%dT%H:%M:%S').strftime("%Y%m%d_%H%M%S")
+            new_filename = f"data_{date_str}_{name}.fits"
+            new_path = os.path.join(os.path.dirname(file_path), new_filename)
+            os.rename(file_path, new_path)
+            return new_path
+    return file_path
+
 if __name__ == "__main__":
     logging.info("Starting radio astronomy processing script")
     os.chdir(BASE_DIR)
     os.makedirs("raw", exist_ok=True)
     os.makedirs("images", exist_ok=True)
-
+    check_file()
     frequency_ranges = read_frequency_ranges()
     file_tracking = {}
 

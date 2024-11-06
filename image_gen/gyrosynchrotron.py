@@ -99,7 +99,7 @@ def process_fft_kernel(fft_values, output):
 
 def identify_gyrosynchrotron_emission(freq, fft_values, magnetic_field_strength, output_dir, date_str, time_str):
     logging.info(f"Starting gyrosynchrotron emission identification for {date_str} {time_str}")
-   
+    time_str = time_str.replace(":","")
     electron_charge = 1.602e-19
     electron_mass = 9.109e-31
     speed_of_light = 3.0e8

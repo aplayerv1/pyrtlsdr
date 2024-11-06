@@ -2,10 +2,34 @@
 
 This project directory contains scripts and files for capturing, processing, and analyzing radio frequency data.
 
+## Hardware
+### SDR Hardware
+    Raspberry Pi: Provides a compact and versatile platform to run pyrtlsdr on, especially useful for portable or embedded SDR applications. With low power consumption, it’s a great choice for field operations or remote monitoring setups.
+
+    HackRF One: A software-defined radio capable of transmission and reception from 1 MHz to 6 GHz. When combined with pyrtlsdr, the HackRF One can perform a wide range of signal processing tasks across this frequency range, making it a flexible option for hobbyists and professionals alike.
+
+    Bias Tee (10 MHz - 6 GHz): A bias tee is useful for powering external devices, like LNA (Low Noise Amplifiers), directly from the radio through the antenna port. When using HackRF One with pyrtlsdr, a bias tee can be enabled in setups that require additional amplification or filtering directly at the antenna input.
+
+
 ## Files and Scripts
+
+## Installation
+
+To set up the project environment, use the provided `install.sh` script:
+
+1. Open a terminal in the project directory.
+2. Make the script executable: `chmod +x install.sh`
+3. Run the installation script: `./install.sh`
+
+This script will install all necessary dependencies and set up the required environment for the project.
+
+## Usage
+
+ - `start.py`: Initiates data capture and processing for specific frequency ranges.
 
 ### Python Scripts:
 
+- `start.py`: Initiates data capture and processing for specific frequency ranges.
 - `process5.py`: Processes data files for analysis.
 - `aim.py`: Handles AI-related tasks for signal processing and analysis.
 - `advanced_signal_processing.py`: Contains advanced signal processing functions.
@@ -21,8 +45,7 @@ This project directory contains scripts and files for capturing, processing, and
 
 - `images/`: Stores output images or visualizations.
 - `raw/`: Directory for storing raw data files.
-
-## Usage
+- `aggregated/`: Directory for storing aggregated data files.
 
 ### Processing Data:
 

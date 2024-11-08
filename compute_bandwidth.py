@@ -8,35 +8,58 @@ import cupy as cp
 import traceback
 import gc
 
-def process_chunk(chunk, fs, full_data, start_row, n_std=3, effective_freq=None, effective_low=None, effective_high=None, nyquist_zone=None):
-    # Perform GPU-accelerated FFT
+import cupy as cp
+import logging
+import numpy as np
+
+def process_chunk(chunk, fs, full_data, chunk_start, gain, effective_freq=0, effective_low=0, effective_high=None, center_frequency=0):
+    logging.debug(f"Processing chunk at {chunk_start} with effective freq {effective_freq} Hz")
+    
+    # Transfer chunk to GPU
     chunk_gpu = cp.asarray(chunk)
-    fft_result = cp.fft.fft(chunk_gpu)
-    freq_bins = cp.fft.fftfreq(len(chunk_gpu), d=1/fs)
     
-    # Adjust frequency bins for bandpass sampling if in higher Nyquist zones
-    if nyquist_zone and nyquist_zone > 1:
-        freq_bins = freq_bins + (nyquist_zone - 1) * fs/2
-        
-    # Apply bandpass filter for the effective frequency range
-    if effective_low is not None and effective_high is not None:
-        freq_mask = (cp.abs(freq_bins) >= effective_low) & (cp.abs(freq_bins) <= effective_high)
-        fft_result = cp.where(freq_mask, fft_result, 0)
+    # Initial signal validation on GPU
+    chunk_power = cp.abs(chunk_gpu).mean()
+    logging.debug(f"Chunk power before processing: {chunk_power}")
     
-    # Apply adaptive thresholding to magnitude of FFT result
-    magnitude = cp.abs(fft_result)
-    threshold = adaptive_threshold(magnitude, n_std)
+    # Apply gain if signal is weak
+    if chunk_power < 1e-10:
+        chunk_gpu *= gain  # Apply gain directly
+        logging.debug(f"Applied gain. New chunk power: {cp.abs(chunk_gpu).mean()}")
     
-    # Filter the FFT result
-    mask = magnitude > threshold
-    filtered_fft = fft_result[mask]
+    # Compute FFT with frequency scaling on GPU
+    fft_chunk_gpu = cp.fft.fft(chunk_gpu)
+    freqs_gpu = cp.fft.fftfreq(len(chunk_gpu), d=1/fs)
     
-    # Transfer results back to CPU and store in full_data
-    filtered_fft = cp.asnumpy(filtered_fft)
-    end_row = start_row + len(filtered_fft)
-    full_data[start_row:end_row] = filtered_fft
+    # Log first few frequency bins for debugging
+    logging.debug(f"Frequencies: {freqs_gpu[:10]}...")
     
-    return len(filtered_fft)
+    # Make sure effective_freq is valid (e.g., set to the center frequency)
+    if effective_freq == 0:
+        effective_freq = center_frequency  # Use center_frequency if effective_freq is zero
+    
+    # Calculate mask based on the effective frequency and low/high cutoffs
+    if effective_high is not None and effective_low is not None:
+        mask_gpu = cp.abs(freqs_gpu - effective_freq) <= (effective_high - effective_low) / 2
+    else:
+        # Use a default mask if high and low cutoffs are not set
+        mask_gpu = cp.abs(freqs_gpu - effective_freq) <= 10e6  # Adjust as needed
+    
+    # Log the mask to debug
+    logging.debug(f"Mask: {mask_gpu[:10]}...")  # Log first few values of the mask
+    
+    # Zero out frequencies outside of the mask
+    fft_chunk_gpu[~mask_gpu] = 0
+    
+    # Log FFT statistics after applying the mask
+    logging.debug(f"FFT mean magnitude after mask: {cp.abs(fft_chunk_gpu).mean()}")
+    logging.debug(f"FFT max magnitude after mask: {cp.abs(fft_chunk_gpu).max()}")
+    
+    # Transfer processed FFT chunk back to the CPU for storage
+    full_data[chunk_start:chunk_start + len(chunk_gpu)] = cp.asnumpy(fft_chunk_gpu)
+    
+    return fft_chunk_gpu
+
 
 
 
@@ -83,89 +106,82 @@ def analyze_clusters(freq, fft_values, labels):
         logging.info(f"Cluster {i}: Avg frequency = {np.mean(cluster_freq):.2f} Hz, Avg magnitude = {np.mean(cluster_fft):.2f}")
 
 def robust_compute_bandwidth(data, center_frequency, low_cutoff, high_cutoff, fs):
-    # Sort frequency range correctly for high frequencies
+    logging.debug(f"Starting robust_compute_bandwidth with parameters:")
+    logging.debug(f"Center Frequency: {center_frequency} Hz, Low Cutoff: {low_cutoff} Hz, High Cutoff: {high_cutoff} Hz, fs: {fs} Hz")
     effective_low, effective_high = min(low_cutoff, high_cutoff), max(low_cutoff, high_cutoff)
     
-    # Calculate FFT with proper scaling for high frequencies
-    fft_values = np.fft.fft(data)
+    # Adjust the cutoffs to be within the Nyquist frequency limit
+    nyquist_freq = fs / 2
+    effective_low = min(effective_low, nyquist_freq)
+    effective_high = min(effective_high, nyquist_freq)
+    # Sort frequency range correctly for high frequencies
+    logging.debug(f"Effective frequency range after sorting: {effective_low} Hz to {effective_high} Hz")
+    
+    # Specialized processing for different frequency ranges
+    if center_frequency == 0:  # Baseband
+        logging.debug("Using Baseband processing with Kaiser window")
+        window = signal.kaiser(len(data), beta=14)
+        gain_factor = 2e4
+        freq_tolerance = 0.02 * fs
+    elif center_frequency > 1e9:  # Above 1 GHz
+        logging.debug("Using Above 1 GHz processing with Blackman window")
+        window = signal.blackman(len(data))
+        gain_factor = 1e6
+        freq_tolerance = 0.005 * fs
+    else:  # Standard processing
+        logging.debug("Using Standard processing with Hamming window")
+        window = signal.hamming(len(data))
+        gain_factor = 1e4
+        freq_tolerance = 0.01 * fs
+
+    # Apply window and calculate FFT
+    logging.debug(f"Applying window of length {len(data)} to the data")
+    fft_values = np.fft.fft(data * window)
     freqs = np.fft.fftfreq(len(data), d=1/fs)
     
-    # Adjust frequency mask for high frequency ranges
-    freq_tolerance = 0.01 * fs  # Add tolerance based on sampling rate
+    # Log frequency bins
+    logging.debug(f"FFT computation done. Frequency bins: {len(freqs)}")
+    logging.debug(f"First few frequencies: {freqs[:10]}")
+    logging.debug(f"Last few frequencies: {freqs[-10:]}")
+
+    # Create frequency mask with tolerance
     mask = (freqs >= effective_low - freq_tolerance) & (freqs <= effective_high + freq_tolerance)
+    logging.debug(f"Mask created with tolerance: {freq_tolerance} Hz")
+
+    # Log the range of values in the mask
+    logging.debug(f"Mask contains {np.sum(mask)} valid frequency bins.")
+    logging.debug(f"First few values of mask: {mask[:10]}")
+    logging.debug(f"Last few values of mask: {mask[-10:]}")
     
-    # Apply gain for weak signals
+    # Check if mask is empty
+    if np.sum(mask) == 0:
+        logging.error(f"Mask is empty! No valid frequencies found in the range {effective_low} to {effective_high}.")
+        return 0, np.array([]), mask, np.array([]), np.array([])
+
+    # Apply gain for signal enhancement
     signal_strength = np.abs(fft_values).mean()
+    logging.debug(f"Initial signal strength: {signal_strength}")
+    
     if signal_strength < 1e-10:
-        fft_values *= 1e6  # Increased gain for high frequencies
+        logging.debug(f"Signal strength below threshold, applying gain factor of {gain_factor}")
+        fft_values *= gain_factor
         
     filtered_fft = fft_values[mask]
     filtered_freq = freqs[mask]
+    logging.debug(f"Filtered FFT and frequency arrays created with {len(filtered_freq)} bins")
+
+    # Ensure both arrays have the same length
+    if len(filtered_freq) != len(filtered_fft):
+        logging.error(f"Array size mismatch: filtered_freq has length {len(filtered_freq)}, "
+                      f"filtered_fft has length {len(filtered_fft)}.")
+        return 0, np.array([]), mask, np.array([]), np.array([])
+
+    # Calculate signal power
     signal_power = np.abs(filtered_fft)**2
-    
+    logging.debug(f"Signal power calculated, shape: {signal_power.shape}")
+
     logging.debug(f"Frequency range: {freqs.min()} to {freqs.max()} Hz")
     logging.debug(f"Mask range: {effective_low} to {effective_high} Hz")
+    logging.debug(f"Signal strength after processing: {np.abs(filtered_fft).mean()}")
     
     return effective_high - effective_low, signal_power, mask, filtered_freq, filtered_fft
-
-
-
-def compute_bandwidth_and_cutoffs(full_data, center_frequency, low_cutoff, high_cutoff, min_bandwidth=1000):
-    """Calculates bandwidth and applies cutoffs to frequency and FFT values."""
-    
-    # Compute FFT of time domain signal
-    fft_values = np.fft.fft(full_data)
-    freq = np.fft.fftfreq(len(full_data), d=1/20e6)
-
-    # Convert to 2D array format expected by rest of function
-    full_data = np.column_stack((freq, fft_values))
-    
-    # Continue with existing processing
-    freq = full_data[:, 0].real
-    fft_values = np.abs(full_data[:, 1])
-    
-    logging.debug(f"Frequency range: {freq.min()} to {freq.max()} Hz")
-    logging.debug(f"FFT values range: {fft_values.min()} to {fft_values.max()}")
-
-    # Calculate threshold for significant frequencies
-    threshold = np.max(fft_values) * 0.1
-    significant_freqs = freq[fft_values > threshold]
-    
-    logging.debug(f"Threshold: {threshold}")
-    logging.debug(f"Number of significant frequencies: {len(significant_freqs)}")
-
-    # Determine initial bandwidth if not provided
-    initial_bandwidth = high_cutoff - low_cutoff
-
-    logging.debug(f"Initial bandwidth: {initial_bandwidth} Hz")
-
-    # Adjust cutoffs based on initial bandwidth and provided values
-    low_cutoff = center_frequency - initial_bandwidth / 2
-    high_cutoff = center_frequency + initial_bandwidth / 2
-    
-    # Ensure low_cutoff and high_cutoff are within the actual frequency range
-    low_cutoff = max(low_cutoff, freq.min())
-    high_cutoff = min(high_cutoff, freq.max())
-    
-    if low_cutoff >= high_cutoff:
-        logging.warning("Low cutoff is not less than high cutoff. Reverting to full frequency range.")
-        low_cutoff = freq.min()
-        high_cutoff = freq.max()
-
-    logging.debug(f"Low cutoff: {low_cutoff} Hz")
-    logging.debug(f"High cutoff: {high_cutoff} Hz")
-
-    # Filter frequencies and FFT values based on cutoffs
-    mask = (freq >= low_cutoff) & (freq <= high_cutoff)
-    filtered_freq = freq[mask]
-    filtered_fft_values = fft_values[mask]
-
-    if len(filtered_freq) == 0:
-        logging.warning("No frequencies left after filtering. Reverting to full frequency range.")
-        filtered_freq = freq
-        filtered_fft_values = fft_values
-
-    logging.debug(f"Number of frequencies after filtering: {len(filtered_freq)}")
-    logging.debug(f"Frequency range After Bandwidth and Cutoff: {filtered_freq.min()} to {filtered_freq.max()} Hz")
-
-    return initial_bandwidth, low_cutoff, high_cutoff, filtered_freq, filtered_fft_values

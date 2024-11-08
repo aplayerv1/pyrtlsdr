@@ -2,6 +2,7 @@ import os
 import re
 import gc
 import argparse
+from scipy.interpolate import interp1d
 from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
@@ -26,7 +27,7 @@ from image_gen.simulate_rotational_vibrational_transitions import simulate_rotat
 from image_gen.position_velocity import create_position_velocity_diagram
 from image_gen.gyrosynchrotron import identify_gyrosynchrotron_emission
 from advanced_signal_processing import advanced_signal_processing_pipeline
-from compute_bandwidth import compute_bandwidth_and_cutoffs, process_chunk, compute_gpu_fft, cyclostationary_feature_detection, classify_signals,robust_compute_bandwidth
+from compute_bandwidth import process_chunk, compute_gpu_fft, cyclostationary_feature_detection, classify_signals,robust_compute_bandwidth
 from check_file import check_file
 import cupy as cp
 
@@ -152,45 +153,55 @@ def process_fft_file(input_fits, output_dir, fs, date, time, lat, lon, duration,
             data = hdul[0].data + 1j * hdul[1].data
             if data.ndim != 1:
                 raise ValueError("FITS data must be a 1D array.")
-            total_rows = data.shape[0]
+            
+            signal_strength = np.abs(data).mean()
+            logging.debug(f"Initial signal strength: {signal_strength}")
+            if signal_strength < 1e-10:
+                data *= 1e3
 
-        # Calculate bandpass sampling parameters
-        nyquist_zone = int(np.ceil(center_frequency / (fs/2)))
-        effective_freq = center_frequency % (fs/2)
-        effective_low = low_cutoff % (fs/2)
-        effective_high = high_cutoff % (fs/2)
-        
-        logging.info(f"Processing frequency {center_frequency} Hz in Nyquist zone {nyquist_zone}")
-        logging.info(f"Effective frequency after aliasing: {effective_freq} Hz")
-        logging.info(f"Effective bandwidth: {effective_low} Hz to {effective_high} Hz")
+            nyquist_freq = fs / 2
+            threshold_frequency = 1e9
+            logging.debug(f"Nyquist frequency: {nyquist_freq} Hz")
+            logging.debug(f"Threshold frequency for aliasing: {threshold_frequency} Hz")
 
-        valid_rows = (total_rows // chunk_size) * chunk_size
-        data = data[:valid_rows]
-        
-        # Use np.memmap with complex64 dtype
-        full_data = np.memmap(temp_output_file, dtype='complex128', mode='w+', shape=(valid_rows,))
-        
-        with ThreadPoolExecutor(max_workers=24) as executor:
-            futures = []
-            for chunk_start in range(0, valid_rows, chunk_size):
-                chunk_end = chunk_start + chunk_size
-                chunk = data[chunk_start:chunk_end]
-                # Pass effective frequencies to process_chunk
-                futures.append(executor.submit(process_chunk, chunk, fs, full_data, chunk_start, 0.1, 
-                                            effective_freq=effective_freq,
-                                            effective_low=effective_low,
-                                            effective_high=effective_high,
-                                            nyquist_zone=nyquist_zone))
+            # Enhanced frequency folding calculation
+            if center_frequency > threshold_frequency:
+                effective_freq = (center_frequency % fs)
+                if effective_freq > nyquist_freq:
+                    effective_freq = fs - effective_freq
+            else:
+                effective_freq = center_frequency
 
-            for future in futures:
-                try:
-                    future.result()
-                except Exception as e:
-                    logging.error(f"An error occurred during chunk processing: {str(e)}")
-        
-        full_data.flush()
-        generate_full_dataset_images(temp_output_file, output_dir, fs, date, time, lat, lon, duration,
-                                   effective_freq, effective_low, effective_high)
+            if low_cutoff > threshold_frequency:
+                effective_low = (low_cutoff % fs)
+                if effective_low > nyquist_freq:
+                    effective_low = fs - effective_low
+            else:
+                effective_low = low_cutoff
+
+            if high_cutoff > threshold_frequency:
+                effective_high = (high_cutoff % fs)
+                if effective_high > nyquist_freq:
+                    effective_high = fs - effective_high
+            else:
+                effective_high = high_cutoff
+
+            logging.debug(f"Effective Frequency: {effective_freq} Hz")
+            logging.debug(f"Effective Low Cutoff: {effective_low} Hz")
+            logging.debug(f"Effective High Cutoff: {effective_high} Hz")
+
+            full_fft = np.fft.fft(data)
+            freqs = np.fft.fftfreq(len(data), d=1/fs)
+            
+            folding_factor = int(center_frequency / fs)
+            effective_freqs = freqs + (folding_factor * fs)
+            
+            full_data = np.memmap(temp_output_file, dtype='complex128', mode='w+', shape=(data.shape[0],))
+            full_data[:] = full_fft[:]
+            full_data.flush()
+
+            generate_full_dataset_images(temp_output_file, output_dir, fs, date, time, lat, lon, duration,
+                                      effective_freq, effective_low, effective_high, effective_freqs)
 
     except Exception as e:
         logging.error(f"An error occurred while processing {input_fits}: {str(e)}")
@@ -199,93 +210,195 @@ def process_fft_file(input_fits, output_dir, fs, date, time, lat, lon, duration,
             os.remove(temp_output_file)
             logging.debug(f"Temporary file {temp_output_file} deleted.")
 
-def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon, duration, effective_freq, effective_low, effective_high):
+
+
+def generate_full_dataset_images(data_file, output_dir, fs, date, time, lat, lon, duration, effective_freq, effective_low, effective_high, effective_freqs):
     file_size = os.path.getsize(data_file)
     num_rows = file_size // np.dtype('complex128').itemsize
     logging.debug(f"File size: {file_size} bytes")
 
     full_data = np.memmap(data_file, dtype='complex128', mode='r', shape=(num_rows,))
-
-    logging.debug("Before compute bandwidth:")
+    
+    # Dynamic processing parameters based on frequency range
+    if effective_freq > 1e9:
+        gain_factor = 8
+        filter_quality = 50
+        wavelet_level = 2
+    elif effective_freq > 100e6:
+        gain_factor = 4
+        filter_quality = 30
+        wavelet_level = 1
+    else:
+        gain_factor = 2
+        filter_quality = 20
+        wavelet_level = 1
+    
     logging.debug(f"Effective Center Frequency: {effective_freq}")
-    
+    logging.debug(f"Input FFT Values Before robust: {full_data}")
+   
+    # Use effective_freqs instead of computing new frequencies
     initial_bandwidth, signal_power, mask, filtered_freq, filtered_fft_values = robust_compute_bandwidth(full_data, effective_freq, effective_low, effective_high,fs)
-
     
-    filtered_fft_values, filtered_freq = advanced_signal_processing_pipeline(filtered_freq, filtered_fft_values, fs, effective_freq, effective_low, effective_high, EARTH_ROTATION_RATE)
+    logging.debug(f"End of compute: {filtered_fft_values}")
     
-    peaks, troughs = find_emission_absorption_lines(filtered_freq, filtered_fft_values, effective_low, effective_high, effective_freq)
-
-    
+    # filtered_fft_values, filtered_freq = advanced_signal_processing_pipeline(
+    # effective_freqs,
+    # filtered_fft_values,
+    # fs,
+    # effective_freq,
+    # effective_low,
+    # effective_high,
+    # EARTH_ROTATION_RATE,
+    # quality_factor=filter_quality, 
+    # step_size=0.05 if effective_freq > 1e9 else 0.1,  # Adjusting based on signal freq
+    # filter_length=20 if effective_freq > 1e9 else 10,  # Smaller length for lower frequencies
+    # gain_factor=gain_factor * 2,  # Test increasing gain if amplification is too weak
+    # wavelet_level=wavelet_level
+    # )
+    logging.debug(f"End of advanced fft: {filtered_fft_values}")
+    logging.debug(f"End of advanced filtered freq: {filtered_freq}")
+    logging.debug(f"End of advanced effective freqs: {effective_freqs}")
+    logging.debug(f"End of advanced effective freq: {effective_freq}")
+    # Use effective_freqs for peak detection
+    peaks, troughs = find_emission_absorption_lines(
+        effective_freqs,
+        filtered_fft_values,
+        effective_low,
+        effective_high,
+        effective_freq
+    )
+    logging.debug(f"End of peaks: {peaks}")
+    logging.debug(f"End of troughs: {troughs}")
     time = time.replace(":","")
     date = date.replace(':', '')
     
+    
+    effective_freqs, filtered_fft_values = align_frequencies(filtered_freq, filtered_fft_values)
+    
+    time_domain_data = np.fft.ifft(filtered_fft_values).real
+    
+    # Generate images using effective_freqs
     if effective_freq < 1000e6:
-        identify_gyrosynchrotron_emission(filtered_freq, filtered_fft_values, MAGNETIC_FIELD_STRENGTH, output_dir, date, time)
+        identify_gyrosynchrotron_emission(effective_freqs, filtered_fft_values, MAGNETIC_FIELD_STRENGTH, output_dir, date, time)
         if effective_freq < 250e6:
-          generate_lofar_image(filtered_fft_values, filtered_fft_values, filtered_freq, output_dir, date, time, lat, lon, duration)
+            generate_lofar_image(filtered_fft_values, time_domain_data, effective_freqs, output_dir, date, time, lat, lon, duration)
 
-                
-    save_waterfall_image(filtered_freq, filtered_fft_values, output_dir, date, time, duration, effective_freq, initial_bandwidth, peaks, troughs, effective_low, effective_high)
-
-    create_intensity_map(filtered_freq, filtered_fft_values, fs, output_dir, date, time, temperature=2.7)
-    save_spectrogram_and_signal_strength(filtered_freq, filtered_fft_values, fs, output_dir, date, time, lat, lon, duration, effective_low, effective_high)
-    calculate_and_save_psd(filtered_freq, filtered_fft_values, fs, output_dir, date, time, effective_freq, initial_bandwidth, effective_low, effective_high)
-
+    # Update all image generation functions to use effective_freqs
+    save_waterfall_image(effective_freqs, filtered_fft_values, output_dir, date, time, duration, effective_freq, initial_bandwidth, peaks, troughs, effective_low, effective_high)
+    create_intensity_map(effective_freqs, filtered_fft_values, fs, output_dir, date, time, temperature=2.7)
+    save_spectrogram_and_signal_strength(effective_freqs, filtered_fft_values, fs, output_dir, date, time, lat, lon, duration, effective_low, effective_high)
+    calculate_and_save_psd(effective_freqs, filtered_fft_values, fs, output_dir, date, time, effective_freq, initial_bandwidth, effective_low, effective_high)
+    
+    # Continue with remaining visualization functions
     simulate_rotational_vibrational_transitions(filtered_fft_values, fs, effective_freq, initial_bandwidth, output_dir, date, time)
-    save_spectra(filtered_freq, filtered_fft_values, peaks, troughs, output_dir, date, time)
-    save_enhanced_spectra(filtered_freq, filtered_fft_values, peaks, troughs, output_dir, date, time)
-    analyze_signal_strength(filtered_freq, filtered_fft_values, output_dir, date, time)
+    save_spectra(effective_freqs, filtered_fft_values, peaks, troughs, output_dir, date, time)
+    save_enhanced_spectra(effective_freqs, filtered_fft_values, peaks, troughs, output_dir, date, time)
+    analyze_signal_strength(effective_freqs, filtered_fft_values, output_dir, date, time)
     create_spectral_line_image(filtered_fft_values, filtered_fft_values, peaks, troughs, output_dir, date, time)
-    brightness_temp_plot(filtered_freq, filtered_fft_values, peaks, troughs, output_dir, date, time, lat, lon, duration)
+    brightness_temp_plot(effective_freqs, filtered_fft_values, peaks, troughs, output_dir, date, time, lat, lon, duration)
     plot_observation_position(output_dir, date, time, lat, lon, duration)
-    run_fft_processing(filtered_freq, filtered_fft_values, effective_freq, output_dir, date, time)
+    run_fft_processing(effective_freqs, filtered_fft_values, effective_freq, output_dir, date, time)
     create_position_velocity_diagram(filtered_fft_values, fs, output_dir, date, time)
-   
+    
     del full_data
 
+def align_frequencies(filtered_freq, filtered_fft_values):
+    # Check if either of the arrays is empty
+    if len(filtered_freq) == 0 or len(filtered_fft_values) == 0:
+        logging.error("One or both of the input arrays are empty. Cannot align frequencies.")
+        return [], []  # Return empty arrays if either is empty
+    
+    # Check the lengths of the two arrays
+    len_freq = len(filtered_freq)
+    len_fft = len(filtered_fft_values)
+
+    # If the lengths are equal, return them as is
+    if len_freq == len_fft:
+        return filtered_freq, filtered_fft_values
+    
+    # If the length of filtered_freq is greater, interpolate filtered_fft_values
+    if len_freq > len_fft:
+        logging.debug(f"Interpolating filtered_fft_values to match the length of filtered_freq ({len_freq}).")
+        interpolator = interp1d(np.linspace(0, len(filtered_fft_values)-1, len_fft),
+                               filtered_fft_values, kind='linear', fill_value="extrapolate")
+        filtered_fft_values = interpolator(np.linspace(0, len_freq-1, len_freq))
+    
+    # If the length of filtered_fft_values is greater, pad filtered_freq to match filtered_fft_values
+    elif len_fft > len_freq:
+        logging.debug(f"Padding filtered_freq to match the length of filtered_fft_values ({len_fft}).")
+        filtered_freq = np.pad(filtered_freq, (0, len_fft - len_freq), 'constant', constant_values=0)
+    
+    logging.debug(f"Returning aligned arrays with shapes: filtered_freq {filtered_freq.shape}, filtered_fft_values {filtered_fft_values.shape}")
+    
+    return filtered_freq, filtered_fft_values
 
 def find_emission_absorption_lines(filtered_freq, filtered_fft_values, effective_low, effective_high, effective_freq):
     logging.debug(f"Input shapes: filtered_freq: {filtered_freq.shape}, filtered_fft_values: {filtered_fft_values.shape}")
     logging.debug(f"Effective frequency range: {effective_low} to {effective_high} Hz")
     logging.debug(f"Effective center frequency: {effective_freq} Hz")
 
-    # Calculate power spectrum
-    power_spectrum = np.abs(filtered_fft_values)**2
-    
-    # Apply median filter for smoothing
-    smoothed_power = medfilt(power_spectrum, kernel_size=5)
+    # Calculate power spectrum with overflow handling
+    clamped_fft_values = np.clip(np.abs(filtered_fft_values), 0, 1e6)
+    power_spectrum = clamped_fft_values ** 2
+    logging.debug(f"Power spectrum range: min {power_spectrum.min()}, max {power_spectrum.max()}")
 
-    # Calculate threshold for peak detection
+    # Dynamic parameters based on frequency range
+    if effective_freq > 1e9:  # Above 1 GHz
+        kernel_size = 7
+        threshold_factor = 4
+        peak_params = {'distance': 80, 'prominence': 0.2, 'width': 5}
+    elif effective_freq > 100e6:  # Above 100 MHz
+        kernel_size = 5
+        threshold_factor = 3
+        peak_params = {'distance': 40, 'prominence': 0.1, 'width': 3}
+    else:  # Below 100 MHz
+        kernel_size = 3
+        threshold_factor = 2
+        peak_params = {'distance': 20, 'prominence': 0.05, 'width': 2}
+
+    # Apply median filter and handle NaNs or Infs
+    smoothed_power = medfilt(power_spectrum, kernel_size=kernel_size)
+    smoothed_power = np.nan_to_num(smoothed_power, nan=0.0, posinf=0.0, neginf=0.0)
+    logging.debug(f"Smoothed power range: min {smoothed_power.min()}, max {smoothed_power.max()}")
+
+    # Calculate dynamic threshold
     mean_power = np.mean(smoothed_power)
     std_power = np.std(smoothed_power)
-    threshold = mean_power + 3 * std_power
+    threshold = mean_power + threshold_factor * std_power
+    logging.debug(f"Threshold set to: {threshold}")
 
     try:
-        # Find peaks and troughs with frequency-dependent parameters
-        if effective_freq < 1e9:
-            # Below 1 GHz - broader features
-            peak_indices, _ = find_peaks(smoothed_power, height=threshold, distance=40)
-            trough_indices, _ = find_peaks(-smoothed_power, height=-threshold, distance=40)
-        else:
-            # 1-6 GHz - narrower spectral lines
-            peak_indices, _ = find_peaks(smoothed_power, height=threshold, distance=80)
-            trough_indices, _ = find_peaks(-smoothed_power, height=-threshold, distance=80)
+        # Peak detection for emission lines
+        peak_params['height'] = threshold
+        peak_indices, _ = find_peaks(smoothed_power, **peak_params)
+        
+        # Trough detection for absorption lines, with different approach for positive-only data
+        trough_params = peak_params.copy()
+        trough_indices, _ = find_peaks(-smoothed_power, prominence=peak_params['prominence'], width=peak_params['width'])
 
+        # Filter peaks and troughs by effective frequency range
         peaks = filtered_freq[peak_indices]
         troughs = filtered_freq[trough_indices]
 
-        # Remove any zero-frequency peaks
-        peaks = peaks[peaks != 0]
+        # Ensure values fall within the specified frequency range
+        peaks = peaks[(peaks >= effective_low) & (peaks <= effective_high)]
+        troughs = troughs[(troughs >= effective_low) & (troughs <= effective_high)]
 
         logging.debug(f"Number of peaks found: {len(peaks)}")
         logging.debug(f"Number of troughs found: {len(troughs)}")
+
+        # Check if no peaks or troughs were found and log a warning
+        if len(peaks) == 0:
+            logging.warning("No peaks detected in the given frequency range.")
+        if len(troughs) == 0:
+            logging.warning("No troughs detected in the given frequency range.")
 
     except Exception as e:
         logging.error(f"Error in find_peaks: {str(e)}", exc_info=True)
         return [], []
 
     return peaks, troughs
+
 
 def is_file_processed(filename):
     processed_file = 'processed.dat'

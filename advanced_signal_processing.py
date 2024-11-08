@@ -281,8 +281,8 @@ def wavelet_denoise(signal, effective_freq, wavelet='db4', level=1):
     
     # Adjust wavelet parameters based on frequency
     if effective_freq > 1e9:
-        level = 2  # More decomposition levels for high frequencies
-        wavelet = 'db6'  # Different wavelet for better high frequency handling
+        level = 2
+        wavelet = 'db6'
     elif effective_freq > 500e6:
         level = 1
         wavelet = 'db4'
@@ -290,33 +290,31 @@ def wavelet_denoise(signal, effective_freq, wavelet='db4', level=1):
     mmap_path = get_mmap_path('wavelet_denoised')
     
     with managed_mmap(mmap_path, signal.dtype, signal.shape) as denoised_mmap:
-        streams = [cp.cuda.Stream() for _ in range(NUM_STREAMS)]
-        
-        for i in range(0, len(signal), CHUNK_SIZE):
-            chunk_end = min(i + CHUNK_SIZE, len(signal))
-            chunk = signal[i:chunk_end]
-            stream_idx = (i // CHUNK_SIZE) % NUM_STREAMS
-            
-            try:
-                with streams[stream_idx], gpu_memory_manager():
-                    # Convert chunk to NumPy for wavelet processing
-                    np_chunk = cp.asnumpy(chunk) if isinstance(chunk, cp.ndarray) else chunk
-                    coeffs = pywt.wavedec(np_chunk, wavelet, level=level)
-                    threshold = float(cp.sqrt(2 * cp.log(len(chunk))))
-                    coeffs = [pywt.threshold(c, value=threshold, mode='soft') for c in coeffs]
-                    denoised_chunk = pywt.waverec(coeffs, wavelet)
-                    
-                    if len(denoised_chunk) != len(chunk):
-                        denoised_chunk = denoised_chunk[:len(chunk)]
-                    
-                    denoised_mmap[i:chunk_end] = denoised_chunk
-                    denoised_mmap.flush()
-                    
-            except (cp.cuda.memory.OutOfMemoryError, RuntimeError) as e:
-                logging.warning(f"GPU processing failed. Using CPU processing.")
-                denoised_chunk = cpu_wavelet_denoise(chunk, wavelet, level)
-                denoised_mmap[i:chunk_end] = denoised_chunk
+        try:
+            with gpu_memory_manager():
+                np_signal = cp.asnumpy(signal) if isinstance(signal, cp.ndarray) else signal
+                coeffs = pywt.wavedec(np_signal, wavelet, level=level)
+                
+                # Calculate an adaptive threshold for each level
+                thresholds = [np.sqrt(2 * np.log(len(c))) for c in coeffs]
+                thresholded_coeffs = [
+                    pywt.threshold(c, value=thr, mode='soft') if np.all(np.isfinite(c)) else np.zeros_like(c)
+                    for c, thr in zip(coeffs, thresholds)
+                ]
+                
+                denoised_signal = pywt.waverec(thresholded_coeffs, wavelet)
+                
+                # Truncate if wavelet reconstruction adds padding
+                denoised_signal = denoised_signal[:len(signal)]
+                
+                denoised_mmap[:] = denoised_signal
                 denoised_mmap.flush()
+                
+        except (cp.cuda.memory.OutOfMemoryError, RuntimeError) as e:
+            logging.warning("GPU processing failed. Using CPU processing.")
+            denoised_signal = cpu_wavelet_denoise(signal, wavelet, level)
+            denoised_mmap[:] = denoised_signal
+            denoised_mmap.flush()
 
         return np.array(denoised_mmap[:])
 
@@ -820,41 +818,50 @@ def apply_notch_filter(fft_data, effective_freq, sampling_rate, quality_factor=3
 
 def bandpass_filter(fft_data, freq, effective_freq, effective_bandwidth):
     """GPU-accelerated bandpass filter with memory mapping and CPU fallback"""
+    logging.info("Starting bandpass filter function")
     logging.debug(f"Starting bandpass filter - effective_freq: {effective_freq}, bandwidth: {effective_bandwidth}")
-    
+    logging.debug(f"Input FFT data shape: {fft_data.shape}, dtype: {fft_data.dtype}")
+    logging.debug(f"Input frequency data shape: {freq.shape}, dtype: {freq.dtype}")
+
     mmap_path = get_mmap_path('bandpass_filtered')
+    logging.debug(f"Created memory map path: {mmap_path}")
+
     lowcut = effective_freq - effective_bandwidth / 2
     highcut = effective_freq + effective_bandwidth / 2
-    
+    logging.debug(f"Calculated frequency bounds - lowcut: {lowcut}, highcut: {highcut}")
+
     with managed_mmap(mmap_path, fft_data.dtype, fft_data.shape) as filtered_mmap:
-        streams = [cp.cuda.Stream() for _ in range(NUM_STREAMS)]
-        
-        for i in range(0, len(fft_data), CHUNK_SIZE):
-            chunk_end = min(i + CHUNK_SIZE, len(fft_data))
-            fft_chunk = fft_data[i:chunk_end]
-            freq_chunk = freq[i:chunk_end]
-            stream_idx = (i // CHUNK_SIZE) % NUM_STREAMS
-            
-            try:
-                with streams[stream_idx], gpu_memory_manager():
-                    fft_chunk_gpu = cp.asarray(fft_chunk)
-                    freq_gpu = cp.asarray(freq_chunk).real.astype(cp.float64)
-                    
-                    mask = (freq_gpu >= lowcut) & (freq_gpu <= highcut)
-                    filtered_chunk = cp.where(mask, fft_chunk_gpu, 0)
-                    
-                    filtered_mmap[i:chunk_end] = cp.asnumpy(filtered_chunk)
-                    filtered_mmap.flush()
-                    
-            except (cp.cuda.memory.OutOfMemoryError, RuntimeError) as e:
-                logging.warning(f"GPU processing failed: {str(e)}. Using CPU processing.")
-                mask = (freq_chunk >= lowcut) & (freq_chunk <= highcut)
-                filtered_chunk = np.where(mask, fft_chunk, 0)
-                filtered_mmap[i:chunk_end] = filtered_chunk
+        try:
+            with cp.cuda.Stream(), gpu_memory_manager():
+                logging.debug("Transferring data to GPU")
+                fft_data_gpu = cp.asarray(fft_data)
+                freq_gpu = cp.asarray(freq).real.astype(cp.float64)
+                
+                logging.debug("Creating frequency mask")
+                mask = (freq_gpu >= lowcut) & (freq_gpu <= highcut)
+                logging.debug(f"Mask sum: {cp.sum(mask)} frequencies within band")
+                
+                filtered_data = cp.where(mask, fft_data_gpu, 0)
+                logging.debug("Applied frequency mask to entire data")
+
+                filtered_mmap[:] = cp.asnumpy(filtered_data)
                 filtered_mmap.flush()
+                logging.debug("Transferred filtered data back to CPU and flushed to memory map")
 
-        return np.array(filtered_mmap[:])
+        except (cp.cuda.memory.OutOfMemoryError, RuntimeError) as e:
+            logging.warning(f"GPU processing failed: {str(e)}. Using CPU processing.")
+            logging.debug("Switching to CPU processing for entire data")
+            mask = (freq >= lowcut) & (freq <= highcut)
+            filtered_data = np.where(mask, fft_data, 0)
+            filtered_mmap[:] = filtered_data
+            filtered_mmap.flush()
+            logging.debug("Completed CPU processing for entire data")
 
+        logging.debug("Converting memory map to numpy array")
+        result = np.array(filtered_mmap[:])
+        logging.info("Bandpass filter processing completed")
+        logging.debug(f"Output array shape: {result.shape}, dtype: {result.dtype}")
+        return result
 
 
 def process_signal(time_domain_signal):
@@ -902,47 +909,85 @@ def process_signal(time_domain_signal):
         if zero_count > 0:
             logging.warning("Zero values detected in time domain signal.")
 
+import numpy as np
+import cupy as cp
+import logging
+from numba import cuda
+import math
+
+# Set up logging configuration
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 @cuda.jit
 def pll_kernel(input_chunk, phi, freq, fs, fmin, fmax, Kp, Ki):
     i = cuda.grid(1)
     if i > 0 and i < input_chunk.shape[0]:
+        # Compute phase error
         phase_error = math.atan2(input_chunk[i].imag * math.cos(phi[i-1]) - input_chunk[i].real * math.sin(phi[i-1]),
                                  input_chunk[i].real * math.cos(phi[i-1]) + input_chunk[i].imag * math.sin(phi[i-1]))
+        
+        # Update frequency based on phase error and previous frequency
         freq[i] = freq[i-1] + Kp * phase_error + Ki * phase_error
+        
+        # Clamp frequency within the given min and max bounds
         freq[i] = max(min(freq[i], fmax), fmin)
+        
+        # Update phase
         phi[i] = phi[i-1] + 2 * math.pi * freq[i] / fs
 
 def phase_locked_loop_gpu(signal, fs, effective_freq, fmin=0, fmax=None, loop_bw=0.01):
     """Optimized PLL for effective frequency ranges"""
-    logging.debug(f"Applying PLL at effective frequency: {effective_freq} Hz")
+    logging.debug(f"Starting phase-locked loop (PLL) processing at effective frequency: {effective_freq} Hz")
     
     # Adjust loop bandwidth based on frequency
     if effective_freq > 1e9:
         loop_bw = 0.005  # Tighter loop for high frequencies
+        logging.debug(f"Adjusted loop bandwidth to {loop_bw} for high frequency (>1 GHz)")
     elif effective_freq > 500e6:
         loop_bw = 0.008
+        logging.debug(f"Adjusted loop bandwidth to {loop_bw} for medium frequency (>500 MHz)")
     
     OPTIMAL_CHUNK_SIZE = 512 * 1024
     total_chunks = len(signal) // OPTIMAL_CHUNK_SIZE + (1 if len(signal) % OPTIMAL_CHUNK_SIZE else 0)
     result = np.zeros_like(signal)
-    
+
+    # Define thread block size (you can adjust this based on your GPU's capacity)
+    THREADS_PER_BLOCK = 256
+
+    logging.info(f"Total number of chunks to process: {total_chunks} (each chunk size: {OPTIMAL_CHUNK_SIZE})")
+
     for i in range(0, len(signal), OPTIMAL_CHUNK_SIZE):
         chunk_end = min(i + OPTIMAL_CHUNK_SIZE, len(signal))
         chunk = signal[i:chunk_end]
         
+        logging.debug(f"Processing chunk {i // OPTIMAL_CHUNK_SIZE + 1}/{total_chunks}, indices {i}-{chunk_end}")
+        
+        # Allocate memory for processing on GPU
         d_chunk = cp.array(chunk)
         phase = cp.zeros_like(d_chunk)
-        output = cp.zeros_like(d_chunk)
+        freq = cp.zeros_like(d_chunk)
         
+        # Calculate number of blocks required
         blocks = (len(chunk) + THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
-        pll_kernel[blocks, THREADS_PER_BLOCK](d_chunk, phase, output, loop_bw, fs, fmin, fmax, THREADS_PER_BLOCK)
-        result[i:chunk_end] = cp.asnumpy(output)
+        logging.debug(f"Launching kernel with {blocks} blocks and {THREADS_PER_BLOCK} threads per block")
         
+        # Call the kernel to process the chunk
+        pll_kernel[blocks, THREADS_PER_BLOCK](d_chunk, phase, freq, fs, fmin, fmax, loop_bw, loop_bw)
+        
+        # Transfer the result back to CPU memory
+        result[i:chunk_end] = cp.asnumpy(freq)
+        
+        # Log the progress
+        logging.info(f"Chunk {i // OPTIMAL_CHUNK_SIZE + 1}/{total_chunks} processed. Frequency range: {freq.min()} Hz to {freq.max()} Hz")
+        
+        # Clear GPU memory pool to prevent memory leakage
         cp.get_default_memory_pool().free_all_blocks()
         
-        logging.info(f"PLL Progress: {(i//OPTIMAL_CHUNK_SIZE)+1}/{total_chunks} chunks ({((i//OPTIMAL_CHUNK_SIZE)+1)/total_chunks*100:.1f}%)")
-    
+        logging.info(f"PLL Progress: {(i//OPTIMAL_CHUNK_SIZE)+1}/{total_chunks} chunks processed ({((i//OPTIMAL_CHUNK_SIZE)+1)/total_chunks*100:.1f}%)")
+
+    logging.debug(f"PLL processing completed. Final frequency range: {result.min()} Hz to {result.max()} Hz")
     return result
+
 
 
 def calculate_sampling_rate(center_freq, bandwidth):
@@ -956,68 +1001,119 @@ def enhance_fft_values(fft_values):
 def preprocess_fft_values(fft_values, kernel_size=3):
     denoised_fft_values = signal.medfilt(np.abs(fft_values), kernel_size=kernel_size)
     return enhance_fft_values(denoised_fft_values)
+
 def advanced_signal_processing_pipeline(filtered_freq, filtered_fft, fs, center_frequency, low_cutoff, high_cutoff, rotation_angle, **kwargs):
-    # Calculate effective frequencies for bandpass sampling
-    nyquist_zone = int(np.ceil(center_frequency / (fs/2)))
-    effective_freq = center_frequency % (fs/2)
-    effective_low = low_cutoff % (fs/2)
-    effective_high = high_cutoff % (fs/2)
+    # Correctly calculate effective frequencies based on the provided parameters
     
-    # Calculate both bandwidths
-    initial_bandwidth = high_cutoff - low_cutoff
+    #     filtered_freq,
+    #     filtered_fft_values,
+    #     fs,
+    #     effective_freq,
+    #     effective_low,
+    #     effective_high,
+    #     EARTH_ROTATION_RATE,
+    #     quality_factor=filter_quality, 
+    #     step_size=0.05 if effective_freq > 1e9 else 0.1,  # Adjusting based on signal freq
+    #     filter_length=20 if effective_freq > 1e9 else 10,  # Smaller length for lower frequencies
+    #     gain_factor=gain_factor * 2,  # Test increasing gain if amplification is too weak
+    #     wavelet_level=wavelet_level
+    effective_freq = center_frequency
+
+    effective_low = low_cutoff
+    effective_high = high_cutoff
     effective_bandwidth = effective_high - effective_low
-    
-    logging.debug(f"Initial Bandwidth: {initial_bandwidth}")
+
     logging.debug(f"Effective Bandwidth: {effective_bandwidth}")
-    logging.debug(f"Nyquist zone: {nyquist_zone}")
     logging.debug(f"Effective frequency range: {effective_low} to {effective_high}")
+    logging.debug(f"Effective frequency: {effective_freq} Hz")
 
-    # Extract parameters with frequency-aware defaults based on effective frequency
-    wavelet = kwargs.get('wavelet', 'db1')
-    wavelet_level = kwargs.get('wavelet_level', 1)
-    notch_center_freq = kwargs.get('notch_center_freq', 60)
-    quality_factor = kwargs.get('quality_factor', 50 if effective_freq > 1e9 else 30)
-    step_size = kwargs.get('step_size', 0.05 if effective_freq > 1e9 else 0.1)
-    filter_length = kwargs.get('filter_length', 20 if effective_freq > 1e9 else 10)
-    Q = kwargs.get('Q', 1e-6 if effective_freq > 1e9 else 1e-5)
-    R = kwargs.get('R', 0.01)
-    alpha = kwargs.get('alpha', 2)
-    beta = kwargs.get('beta', 0.01)
-    kernel_size = kwargs.get('kernel_size', 5 if effective_freq > 1e9 else 3)
-    fmin = kwargs.get('fmin', 0)
-    fmax = kwargs.get('fmax', fs / 2)
-    loop_bw = kwargs.get('loop_bw', 0.01)
-    comb_notch_freq = kwargs.get('comb_notch_freq', 50)
-    num_imfs = kwargs.get('num_imfs', None)
-    noise_threshold = kwargs.get('noise_threshold', 0.1)
-    noise_reference = kwargs.get('noise_reference', None)
-    n_components = kwargs.get('n_components', None)
-    template = kwargs.get('template', None)
+    if center_frequency == 0:
+        params = {
+            'wavelet': 'sym8',
+            'wavelet_level': 3,
+            'quality_factor': 40,
+            'step_size': 0.05,
+            'filter_length': 20,
+            'Q': 1e-7,
+            'gain_factor': 4,
+            'kernel_size': 7,
+            'alpha': 2,
+            'beta': 0.01,
+            'loop_bw': 0.01,
+            'comb_notch_freq': 50,
+            'noise_threshold': 0.1
+        }
+    else:
+        params = get_frequency_specific_params(effective_freq, fs)
+    
+    params.update(kwargs)
 
-    # Apply filters using effective frequencies
-    filtered_fft = apply_notch_filter(filtered_fft, effective_freq, fs, quality_factor)
+    filtered_fft = apply_notch_filter(filtered_fft, effective_freq, fs, params['quality_factor'])
     time_domain_signal = np.fft.ifft(filtered_fft)
     time_domain_signal = bandpass_filter(time_domain_signal, filtered_freq, effective_freq, effective_bandwidth)
-    time_domain_signal = amplify_signal(time_domain_signal, effective_freq, 4 if effective_freq > 1e9 else 2)
+    time_domain_signal = amplify_signal(time_domain_signal, effective_freq, params['gain_factor'])
 
-    
     desired_signal = kwargs.get('desired_signal', time_domain_signal)
-    time_domain_signal = adaptive_filter(time_domain_signal, desired_signal, effective_freq, step_size=step_size, filter_length=filter_length)
-    time_domain_signal = wavelet_denoise(time_domain_signal, effective_freq, wavelet=wavelet, level=wavelet_level)
-    time_domain_signal = kalman_filter_gpu(time_domain_signal,effective_freq, Q=Q, R=R)
-    
-    noise_estimate = kwargs.get('noise_estimate', np.mean(time_domain_signal))
-    time_domain_signal = spectral_subtraction(time_domain_signal, noise_estimate, effective_freq, alpha=alpha, beta=beta)
-    time_domain_signal = median_filter(time_domain_signal, effective_freq, kernel_size=kernel_size)
-    time_domain_signal = phase_locked_loop_gpu(time_domain_signal, fs, effective_freq, fmin=effective_low, fmax=effective_high, loop_bw=loop_bw)
-    time_domain_signal = comb_filter(time_domain_signal, fs, effective_freq, comb_notch_freq, quality_factor)
-    time_domain_signal = emd_denoising(time_domain_signal, effective_freq, num_imfs=num_imfs, noise_threshold=noise_threshold)
+    time_domain_signal = adaptive_filter(time_domain_signal, desired_signal, effective_freq, step_size=params['step_size'], filter_length=params['filter_length'])
+    time_domain_signal = wavelet_denoise(time_domain_signal, effective_freq, wavelet=params['wavelet'], level=params['wavelet_level'])
+    time_domain_signal = kalman_filter_gpu(time_domain_signal, effective_freq, Q=params['Q'], R=0.01)
 
 
-    if noise_reference is not None:
-        time_domain_signal = ica_denoise(time_domain_signal, noise_reference, n_components=n_components)
-    
-    if template is not None:
-        time_domain_signal = matched_filter(time_domain_signal, template)
+
+    # time_domain_signal = spectral_subtraction(time_domain_signal, np.mean(time_domain_signal), effective_freq, alpha=params['alpha'], beta=params['beta'])
+    # time_domain_signal = median_filter(time_domain_signal, effective_freq, kernel_size=params['kernel_size'])
+    # time_domain_signal = phase_locked_loop_gpu(time_domain_signal, fs, effective_freq, fmin=effective_low, fmax=effective_high, loop_bw=params['loop_bw'])
+    # time_domain_signal = comb_filter(time_domain_signal, fs, effective_freq, params['comb_notch_freq'], params['quality_factor'])
+    # time_domain_signal = emd_denoising(time_domain_signal, effective_freq, num_imfs=params['wavelet_level'], noise_threshold=params['noise_threshold'])
 
     return time_domain_signal, filtered_freq
+
+def get_frequency_specific_params(effective_freq, fs):
+    if effective_freq > 1e9:
+        return {
+            'wavelet': 'db4',
+            'wavelet_level': 2,
+            'quality_factor': 50,
+            'step_size': 0.05,
+            'filter_length': 20,
+            'Q': 1e-6,
+            'gain_factor': 8,
+            'kernel_size': 5,
+            'alpha': 2.5,
+            'beta': 0.008,
+            'loop_bw': 0.005,
+            'comb_notch_freq': 50,
+            'noise_threshold': 0.05
+        }
+    elif effective_freq > 100e6:
+        return {
+            'wavelet': 'db4',
+            'wavelet_level': 1,
+            'quality_factor': 30,
+            'step_size': 0.08,
+            'filter_length': 15,
+            'Q': 1e-5,
+            'gain_factor': 4,
+            'kernel_size': 3,
+            'alpha': 2.0,
+            'beta': 0.01,
+            'loop_bw': 0.008,
+            'comb_notch_freq': 50,
+            'noise_threshold': 0.08
+        }
+    else:
+        return {
+            'wavelet': 'db1',
+            'wavelet_level': 1,
+            'quality_factor': 20,
+            'step_size': 0.1,
+            'filter_length': 10,
+            'Q': 1e-5,
+            'gain_factor': 2,
+            'kernel_size': 3,
+            'alpha': 1.5,
+            'beta': 0.02,
+            'loop_bw': 0.01,
+            'comb_notch_freq': 50,
+            'noise_threshold': 0.1
+        }

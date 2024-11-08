@@ -67,28 +67,28 @@ def extract_datetime_from_filename(filename):
     
     # Multiple patterns to match different filename formats
     patterns = [
-        r'data_(\d{6}_\d{6})',  # Original format
-        r'(\d{6}_\d{6})',       # Just the date/time
-        r'(\d{8}_\d{6})'        # Full year format
+        r'data_(\d{8})_(\d{6})',  # YYYYMMDD_HHMMSS format
+        r'data_(\d{6})_(\d{6})',  # YYMMDD_HHMMSS format
+        r'(\d{8})_(\d{6})',       # Just YYYYMMDD_HHMMSS
+        r'(\d{6})_(\d{6})'        # Just YYMMDD_HHMMSS
     ]
     
     for pattern in patterns:
         match = re.search(pattern, basename)
         if match:
-            datetime_str = match.group(1)
+            date_str, time_str = match.groups()
             try:
-                # Try both 6-digit and 8-digit year formats
-                if len(datetime_str.split('_')[0]) == 6:
-                    return datetime.datetime.strptime(datetime_str, '%y%m%d_%H%M%S')
+                if len(date_str) == 6:
+                    return datetime.strptime(f"{date_str}_{time_str}", "%y%m%d_%H%M%S")
                 else:
-                    return datetime.datetime.strptime(datetime_str, '%Y%m%d_%H%M%S')
+                    return datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
             except ValueError:
                 continue
     
-    # If no pattern matches, use current datetime
-    current_time = datetime.datetime.now()
+    current_time = datetime.now()
     logging.warning(f"Using current datetime {current_time} for filename {basename}")
     return current_time
+
 
 def main():
 

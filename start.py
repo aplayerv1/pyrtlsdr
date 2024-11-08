@@ -18,6 +18,7 @@ from astropy.io import fits
 
 logging.basicConfig(filename='radio_astronomy.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
+queue_processing_complete = threading.Event()
 process_semaphore = threading.Semaphore(1)
 
 file_queue = queue.Queue()
@@ -59,13 +60,6 @@ def rename_and_move_file(latest_file, fileappend):
         logging.info(f"File renamed and moved: {new_filename}")
     except OSError as e:
         logging.error(f"Failed to rename file {latest_file} to raw/{new_filename}: {e}")
-
-def calculate_sampling_rate(ffreq, lfreq, duration, tolerance):
-    bandwidth = lfreq - ffreq
-    highest_freq = max(ffreq, lfreq)
-    min_sampling_rate = 2 * highest_freq
-    srf = max(min_sampling_rate, 2 * bandwidth + tolerance)
-    return srf
 
 def extract_info_from_fits(file_path):
     with fits.open(file_path) as hdul:
@@ -161,41 +155,42 @@ def process_and_heatmap(file, sfreq, srf, tol, chunk, duration_hours, lat, lon, 
 
 def process_file_queue():
     logging.info("process_file_queue started")
-    empty_count = 0
-    while True:
-        try:
-            file_info = file_queue.get(block=False)
-            empty_count = 0  # Reset counter when an item is found
-            logging.info(f"Processing file: {file_info['file']}")
-            process_and_heatmap(**file_info)
-            file_queue.task_done()
-            logging.info(f"Completed processing file: {file_info['file']}")
-        except queue.Empty:
-            empty_count += 1
-            if empty_count % 10 == 0:  # Log every 10th empty check
-                logging.info(f"Queue empty for {empty_count} consecutive checks")
-            time.sleep(0.1)  # Short sleep to prevent busy waiting
-        except Exception as e:
-            logging.error(f"Error processing file: {e}", exc_info=True)
-        finally:
-            log_queue_size()
+    empty_start_time = None
+    max_wait_time = 20 * 60  # 20 minutes in seconds
+    last_log_time = 0
+    log_interval = 60  # Log only every 60 seconds
 
-def process_file_queue():
-    logging.info("process_file_queue started")
     while True:
         try:
             file_info = file_queue.get(block=False)
+            empty_start_time = None
+            
             logging.info(f"Processing file: {file_info['file']}")
             process_and_heatmap(**file_info)
             file_queue.task_done()
             logging.info(f"Completed processing file: {file_info['file']}")
+
         except queue.Empty:
-            logging.info("File queue is empty. Waiting for new files...")
-            time.sleep(5)  # Wait for 5 seconds before checking again
+            current_time = time.time()
+            if empty_start_time is None:
+                empty_start_time = current_time
+            
+            if current_time - last_log_time >= log_interval:
+                logging.info("File queue is empty. Waiting for new files...")
+                last_log_time = current_time
+                log_queue_size()
+            
+            elapsed_time = current_time - empty_start_time
+            if elapsed_time >= max_wait_time:
+                logging.info("No files in queue for 20 minutes. Stopping queue processing.")
+                queue_processing_complete.set()
+                cleanup_and_sync()
+                sys.exit(0)
+                
+            time.sleep(5)
+
         except Exception as e:
             logging.error(f"Error processing file: {e}", exc_info=True)
-        finally:
-            log_queue_size()
 
 
 
@@ -263,7 +258,7 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend, low_cutoff, high_cu
         file_queue.put({
             'file': file,
             'sfreq': sfreq,
-            'srf': calculate_sampling_rate(ffreq, lfreq, DURATION, TOL),
+            'srf': SRF,
             'tol': TOL,
             'chunk': CHUNK,
             'duration_hours': DURATION,
@@ -279,7 +274,7 @@ def process_frequency_range(ffreq, lfreq, sfreq, fileappend, low_cutoff, high_cu
     duration = DURATION
     duration_hours = duration
 
-    srf = calculate_sampling_rate(ffreq, lfreq, DURATION, TOL)
+    srf = SRF
 
     range_queue.put((ffreq, lfreq, SRF, duration, IP, PORT))
     logging.info(f"Range queue updated. Starting file wait loop.")
@@ -358,6 +353,7 @@ def cleanup_and_sync_with_timeout():
     cleanup_thread.join(timeout=60)  # 10 minutes timeout
     if cleanup_thread.is_alive():
         logging.error("Cleanup and sync process did not complete within the timeout period")
+        os._exit(1)  # Force exit the program
 
 def read_frequency_ranges(file_path='frequency_ranges.csv'):
     frequency_ranges = []
@@ -414,23 +410,22 @@ if __name__ == "__main__":
         future_to_range = {executor.submit(process_frequency_range, *args): args for args in frequency_ranges}
         
         while True:
-            done, not_done = concurrent.futures.wait(future_to_range.keys(), timeout=60)  # 1 minute timeout
+            done, not_done = concurrent.futures.wait(future_to_range.keys(), timeout=60)
             
             new_files = [f for f in os.listdir(BASE_DIR) if f.endswith('.fits')]
             processes_running = any(p.name() in ['python', 'process5.py', 'range.py', 'heatmap.py'] for p in psutil.process_iter(['name']))
 
-            if not not_done and not new_files and not processes_running and file_queue.empty() and range_queue.empty():
-                no_activity_count += 1
-                logging.info(f"No new files or active processes. Count: {no_activity_count}")
-                if no_activity_count >= max_no_activity:
-                    logging.info("No activity detected for a while. Exiting.")
-                    break
-            else:
-                no_activity_count = 0
+            if (not not_done and not new_files and not processes_running and 
+                file_queue.empty() and range_queue.empty()) or queue_processing_complete.is_set():
+                logging.info("Processing complete or timed out. Moving to cleanup.")
+                break
 
             logging.info(f"Completed futures: {len(done)}, Incomplete futures: {len(not_done)}")
+            time.sleep(60)
 
-            time.sleep(60)  # Wait for 1 minute before checking again
+        # Add immediate cleanup call here
+        logging.info("Starting cleanup and sync process")
+        cleanup_and_sync()
 
         for future, args in future_to_range.items():
             try:
